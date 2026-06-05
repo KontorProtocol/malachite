@@ -172,6 +172,16 @@ pub struct State {
 }
 
 impl State {
+    /// Record the resolved listen address reported by the swarm on bind.
+    ///
+    /// Replaces the configured listen address (which for an OS-assigned
+    /// `/tcp/0` port is not the one actually bound), so `dump_state` and the
+    /// `listen_addr` metric report the real address — consistent with the
+    /// `Listening` event, which already carries the resolved address.
+    pub fn record_listen_addr(&mut self, addr: Multiaddr) {
+        self.local_node.listen_addr = addr;
+    }
+
     /// Process a validator set update from consensus.
     ///
     /// This method:

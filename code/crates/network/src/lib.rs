@@ -796,6 +796,8 @@ async fn handle_swarm_event(
         SwarmEvent::NewListenAddr { address, .. } => {
             debug!(%address, "Node is listening");
 
+            state.record_listen_addr(address.clone());
+
             if let Err(e) = tx_event.send(Event::Listening(address)).await {
                 error!("Error sending listening event to handle: {e}");
                 return ControlFlow::Break(());
