@@ -54,7 +54,9 @@ pub enum Error {
 enum RequestOutcome {
     /// First valid proof from this peer; deliver it.
     Deliver(Bytes),
-    /// Reject and disconnect (malformed, or a second proof this session).
+    /// Already accepted a proof from this peer this session.
+    Ignore,
+    /// Reject and disconnect (malformed).
     Reject(&'static str),
 }
 
@@ -118,12 +120,13 @@ impl Behaviour {
                 if self.proofs_received.insert(peer) {
                     RequestOutcome::Deliver(bytes)
                 } else {
-                    RequestOutcome::Reject("duplicate validator proof")
+                    RequestOutcome::Ignore
                 }
             }
         }
     }
 
+    /// Send our proof once per session, on the first connection to the peer.
     fn on_connection_established(&mut self, peer: PeerId) {
         let Some(proof_bytes) = self.proof_bytes.clone() else {
             return;
@@ -162,6 +165,10 @@ impl Behaviour {
                             peer,
                             proof_bytes,
                         }))
+                    }
+                    RequestOutcome::Ignore => {
+                        trace!(%peer, "Ignoring duplicate validator proof this session");
+                        None
                     }
                     RequestOutcome::Reject(reason) => {
                         warn!(%peer, reason, "Rejecting validator proof, closing connection");
@@ -326,7 +333,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_proof_delivers_then_duplicate_rejected() {
+    fn first_proof_delivers_then_duplicate_is_ignored() {
         let mut b = Behaviour::with_default_protocol();
         let peer = PeerId::random();
 
@@ -337,7 +344,7 @@ mod tests {
         assert!(b.proofs_received.contains(&peer));
         assert!(matches!(
             b.classify_request(peer, ProofRequest::Proof(Bytes::from_static(b"proof"))),
-            RequestOutcome::Reject(_)
+            RequestOutcome::Ignore
         ));
     }
 
@@ -393,7 +400,7 @@ mod tests {
         ));
         assert!(matches!(
             b.classify_request(peer, ProofRequest::Proof(Bytes::from_static(b"proof"))),
-            RequestOutcome::Reject(_)
+            RequestOutcome::Ignore
         ));
 
         b.on_last_connection_closed(peer);

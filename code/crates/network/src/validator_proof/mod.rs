@@ -28,8 +28,8 @@
 //! ```
 //!
 //! `ProofSent` marks local send completion, not confirmed remote delivery. There
-//! is no same-session retry; a genuinely new connection starts a fresh session
-//! and sends the proof again.
+//! is no same-session retry; the proof is sent again in the next session, after
+//! the last connection closes and the peer reconnects.
 //!
 //! The proof is a static binding of (public_key, peer_id) and does not change
 //! with validator set membership. Whether the receiver classifies us as a
@@ -50,7 +50,7 @@
 //! ### 1. `validator_proof/behaviour.rs` (Network Layer)
 //! - **Message size**: Max 1KB enforced by codec
 //! - **Inbound read failure**: behaviour emits `CloseConnection` → DISCONNECT
-//! - **Anti-spam**: a second proof from a peer this session → `CloseConnection`
+//! - **Anti-spam**: a second proof from a peer this session is ignored
 //!
 //! ### 2. `network/lib.rs` (Network Layer - Event Handling)
 //! - Forwards proof to engine (anti-spam already handled by behaviour)
@@ -69,7 +69,8 @@
 //! ## Failure Handling
 //!
 //! **Send failures** (`ProofSendFailed`):
-//! - Forwarded to swarm; a new connection sends the proof again
+//! - Forwarded to swarm; the proof is sent again when a new session starts,
+//!   that is, on the first connection after all connections to the peer close
 //!
 //! **Malformed requests**:
 //! - A framing error, oversized message, truncated payload, or read timeout is
@@ -77,7 +78,8 @@
 //!   which the behaviour turns into `CloseConnection` → DISCONNECT
 //!
 //! **Anti-spam** (behaviour level):
-//! - A second proof from a peer this session → `CloseConnection` → DISCONNECT
+//! - A second proof from a peer this session is ignored, so a sender that sends
+//!   more than one copy keeps its connections
 //! - Tracked via `proofs_received`, cleared when the last connection closes
 //!
 //! **Decode failures** (application codec):

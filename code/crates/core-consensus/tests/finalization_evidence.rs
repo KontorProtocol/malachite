@@ -17,6 +17,14 @@ fn run(r: Result<(), Error<TestContext>>) {
 }
 
 fn make_state(validators: &[Validator], my_addr: Address) -> State<TestContext> {
+    make_state_with_payload(validators, my_addr, ValuePayload::ProposalOnly)
+}
+
+fn make_state_with_payload(
+    validators: &[Validator],
+    my_addr: Address,
+    value_payload: ValuePayload,
+) -> State<TestContext> {
     let vs = ValidatorSet::new(validators.to_vec());
     State::new(
         TestContext::new(),
@@ -25,7 +33,7 @@ fn make_state(validators: &[Validator], my_addr: Address) -> State<TestContext> 
         Params {
             address: my_addr,
             threshold_params: Default::default(),
-            value_payload: ValuePayload::ProposalOnly,
+            value_payload,
             enabled: true,
         },
         1000,
@@ -197,6 +205,22 @@ fn proposal_evidence_count(state: &State<TestContext>, addr: Address) -> usize {
         .unwrap_or(0)
 }
 
+/// A round 1 proposal for `value` from `proposer`.
+///
+/// A same-value equivocation needs two proposals that differ only in `pol_round`. Consensus
+/// drops a proposal whose `pol_round` is not lower than its round. In round 0, the only
+/// well-formed `pol_round` is `Nil`. In round 1, `Nil` and `0` are both well-formed.
+fn round_one_proposal(
+    proposer: Address,
+    value: Value,
+    pol_round: Round,
+) -> SignedProposal<TestContext> {
+    SignedProposal::new(
+        Proposal::new(Height::new(1), Round::new(1), value, pol_round, proposer),
+        Signature::test(),
+    )
+}
+
 struct TestCase {
     name: &'static str,
     make_input: fn(Address) -> Input<TestContext>,
@@ -217,24 +241,151 @@ fn same_value_proposal_with_different_pol_round_is_recorded_as_evidence() {
     let mut state = make_state(&validators, proposer);
     drive_to_finalization(&mut state, &metrics, &validators, proposer, value.clone());
 
-    // The first proposal — fed inside `drive_to_finalization` — has `pol_round = Nil`.
-    // Feed a second proposal from the same proposer for the same `(height, round, value)`
-    // but with a different `pol_round`. The two proposals share a value id, so they
-    // are filtered as a "same value" pair at the full-proposal keeper; evidence must
-    // still be recorded.
-    let equivocating = Input::Proposal(SignedProposal::new(
-        Proposal::new(
-            Height::new(1),
-            Round::new(0),
-            value,
-            Round::new(0),
-            proposer,
+    // Feed two round 1 proposals from the same proposer for the same value, one with
+    // `pol_round` `Nil` and one with `pol_round` 0. The two proposals share a value id, so
+    // the full-proposal keeper filters them as a "same value" pair. Evidence must still be
+    // recorded.
+    let round_one_proposer = *state.get_proposer(Height::new(1), Round::new(1));
+    let first = round_one_proposal(round_one_proposer, value.clone(), Round::Nil);
+    let equivocating = round_one_proposal(round_one_proposer, value, Round::new(0));
+
+    for proposal in [first, equivocating] {
+        run(process!(
+            input: Input::Proposal(proposal),
+            state: &mut state,
+            metrics: &metrics,
+            with: effect => handle_effect(effect)
+        ));
+    }
+
+    assert_eq!(
+        proposal_evidence_count(&state, round_one_proposer),
+        1,
+        "proposal equivocation should be detected even when the two proposals \
+         carry the same value id"
+    );
+}
+
+#[test]
+fn distinct_value_proposals_are_recorded_as_evidence_before_any_value_arrives() {
+    let validators: Vec<_> = make_validators([1, 1, 1])
+        .into_iter()
+        .map(|(v, _)| v)
+        .collect();
+    let validator_set = ValidatorSet::new(validators.clone());
+    let metrics = Metrics::new();
+
+    // The value comes from streamed parts, so the proposer decides whether it arrives at all.
+    let payload = ValuePayload::ProposalAndParts;
+    let proposer = *make_state_with_payload(&validators, validators[0].address, payload)
+        .get_proposer(Height::new(1), Round::new(0));
+    let me = validators
+        .iter()
+        .find(|validator| validator.address != proposer)
+        .expect("a non-proposer validator")
+        .address;
+    let mut state = make_state_with_payload(&validators, me, payload);
+
+    run(process!(
+        input: Input::StartHeight(Height::new(1), validator_set, false, None, Default::default()),
+        state: &mut state,
+        metrics: &metrics,
+        with: effect => handle_effect(effect)
+    ));
+
+    for value in [Value::new(10), Value::new(20)] {
+        run(process!(
+            input: Input::Proposal(SignedProposal::new(
+                Proposal::new(Height::new(1), Round::new(0), value, Round::Nil, proposer),
+                Signature::test(),
+            )),
+            state: &mut state,
+            metrics: &metrics,
+            with: effect => handle_effect(effect)
+        ));
+    }
+
+    assert_eq!(
+        proposal_evidence_count(&state, proposer),
+        1,
+        "two proposals with distinct value ids should be recorded as evidence when the second \
+         proposal arrives"
+    );
+
+    // No value was ever fed, so neither proposal became a full proposal. The evidence therefore
+    // did not wait on either value.
+    for value in [Value::new(10), Value::new(20)] {
+        assert!(
+            state
+                .full_proposal_at_round_and_value(&Height::new(1), Round::new(0), &value)
+                .is_none(),
+            "no value arrived, so no proposal should be full"
+        );
+    }
+}
+
+#[test]
+fn distinct_value_proposals_are_recorded_as_evidence_when_only_one_value_arrives() {
+    let validators: Vec<_> = make_validators([1, 1, 1])
+        .into_iter()
+        .map(|(v, _)| v)
+        .collect();
+    let validator_set = ValidatorSet::new(validators.clone());
+    let metrics = Metrics::new();
+
+    let payload = ValuePayload::ProposalAndParts;
+    let proposer = *make_state_with_payload(&validators, validators[0].address, payload)
+        .get_proposer(Height::new(1), Round::new(0));
+    let me = validators
+        .iter()
+        .find(|validator| validator.address != proposer)
+        .expect("a non-proposer validator")
+        .address;
+    let mut state = make_state_with_payload(&validators, me, payload);
+
+    run(process!(
+        input: Input::StartHeight(Height::new(1), validator_set, false, None, Default::default()),
+        state: &mut state,
+        metrics: &metrics,
+        with: effect => handle_effect(effect)
+    ));
+
+    let streamed = Value::new(10);
+    let withheld = Value::new(20);
+
+    run(process!(
+        input: Input::Proposal(SignedProposal::new(
+            Proposal::new(Height::new(1), Round::new(0), streamed.clone(), Round::Nil, proposer),
+            Signature::test(),
+        )),
+        state: &mut state,
+        metrics: &metrics,
+        with: effect => handle_effect(effect)
+    ));
+
+    // The proposer streams the parts for the first value only.
+    run(process!(
+        input: Input::ProposedValue(
+            ProposedValue {
+                height: Height::new(1),
+                round: Round::new(0),
+                valid_round: Round::Nil,
+                proposer,
+                value: streamed.clone(),
+                validity: Validity::Valid,
+            },
+            ValueOrigin::Consensus,
         ),
-        Signature::test(),
+        state: &mut state,
+        metrics: &metrics,
+        with: effect => handle_effect(effect)
     ));
 
     run(process!(
-        input: equivocating,
+        input: Input::Proposal(SignedProposal::new(
+            Proposal::new(Height::new(1), Round::new(0), withheld.clone(), Round::Nil, proposer),
+            Signature::test(),
+        )),
         state: &mut state,
         metrics: &metrics,
         with: effect => handle_effect(effect)
@@ -243,9 +394,16 @@ fn same_value_proposal_with_different_pol_round_is_recorded_as_evidence() {
     assert_eq!(
         proposal_evidence_count(&state, proposer),
         1,
-        "proposal equivocation should be detected even when the two proposals \
-         carry the same value id"
+        "the equivocation should be recorded even though the value for the second proposal \
+         never arrives"
     );
+
+    assert!(state
+        .full_proposal_at_round_and_value(&Height::new(1), Round::new(0), &streamed)
+        .is_some());
+    assert!(state
+        .full_proposal_at_round_and_value(&Height::new(1), Round::new(0), &withheld)
+        .is_none());
 }
 
 #[test]
@@ -261,16 +419,16 @@ fn repeated_same_value_equivocating_proposal_is_deduplicated() {
     let mut state = make_state(&validators, proposer);
     drive_to_finalization(&mut state, &metrics, &validators, proposer, value.clone());
 
-    let equivocating = SignedProposal::new(
-        Proposal::new(
-            Height::new(1),
-            Round::new(0),
-            value,
-            Round::new(0),
-            proposer,
-        ),
-        Signature::test(),
-    );
+    let round_one_proposer = *state.get_proposer(Height::new(1), Round::new(1));
+    let first = round_one_proposal(round_one_proposer, value.clone(), Round::Nil);
+    let equivocating = round_one_proposal(round_one_proposer, value, Round::new(0));
+
+    run(process!(
+        input: Input::Proposal(first),
+        state: &mut state,
+        metrics: &metrics,
+        with: effect => handle_effect(effect)
+    ));
 
     for _ in 0..3 {
         run(process!(
@@ -282,7 +440,7 @@ fn repeated_same_value_equivocating_proposal_is_deduplicated() {
     }
 
     assert_eq!(
-        proposal_evidence_count(&state, proposer),
+        proposal_evidence_count(&state, round_one_proposer),
         1,
         "receiving the same equivocating proposal multiple times should still record \
          exactly one evidence entry"
