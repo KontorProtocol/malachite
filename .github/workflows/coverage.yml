@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 1
   CARGO_PROFILE_RELEASE_DEBUG: 1
@@ -17,11 +18,12 @@ env:
 jobs:
   changes:
     name: Detect changes
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     permissions:
       pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      codecov: ${{ steps.filter.outputs.codecov }}
       specs: ${{ steps.filter.outputs.specs }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -31,8 +33,10 @@ jobs:
           filters: |
             code:
               - 'code/**'
+              - '.github/workflows/**'
             specs:
               - 'specs/**'
+              - '.github/workflows/**'
             codecov:
               - 'codecov.yml'
 
@@ -40,7 +44,7 @@ jobs:
     name: Integration
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.codecov == 'true' || github.ref == 'refs/heads/main' }}
-    runs-on: github-hosted-large
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}
     defaults:
       run:
         working-directory: code
@@ -52,7 +56,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1
         with:
-          toolchain: nightly-2025-01-07 # pin to working nightly
+          toolchain: 1.99.1
           components: llvm-tools-preview
       - name: Install cargo-nextest
         uses: taiki-e/install-action@ea550356e2321dfdcd1d315eb6bf64d259aa5da1 # cargo-nextest
@@ -66,7 +70,6 @@ jobs:
             --ignore-filename-regex crates/cli \
             --all-features \
             --no-capture \
-            --ignore-run-fail \
             --codecov \
             --output-path coverage-integration.info
       - name: Generate text report
@@ -78,7 +81,8 @@ jobs:
           path: code/coverage-integration.info
           retention-days: 1
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        # Coverage artifacts remain available on the fork; the upload needs upstream secrets.
+        if: ${{ !cancelled() && github.repository == 'circlefin/malachite' }}
         uses: codecov/test-results-action@47f89e9acb64b76debcd5ea40642d25a4adced9f # v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -89,7 +93,7 @@ jobs:
   #   name: MBT
   #   needs: changes
   #   if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.specs == 'true' || needs.changes.outputs.codecov == 'true' || github.ref == 'refs/heads/main' }}
-  #   runs-on: github-hosted-large
+  #   runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}
   #   defaults:
   #     run:
   #       working-directory: code
@@ -111,7 +115,7 @@ jobs:
   #     - name: Setup Rust toolchain
   #       uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1
   #       with:
-  #         toolchain: nightly-2025-01-07 # pin to working nightly
+  #         toolchain: 1.99.1
   #         components: llvm-tools-preview
   #     - name: Install cargo-nextest
   #       uses: taiki-e/install-action@ea550356e2321dfdcd1d315eb6bf64d259aa5da1 # cargo-nextest
@@ -141,10 +145,10 @@ jobs:
 
   upload-coverage:
     name: Upload coverage to Codecov
-    # needs: [changes, integration, mbt]
-    # needs: [changes, integration]
-    runs-on: github-hosted-small
-    if: ${{ !cancelled() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.specs == 'true' || needs.changes.outputs.codecov == 'true' || github.ref == 'refs/heads/main') }}
+    needs: [changes, integration]
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
+    # Only upstream has the Codecov publication credentials.
+    if: ${{ github.repository == 'circlefin/malachite' && !cancelled() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.specs == 'true' || needs.changes.outputs.codecov == 'true' || github.ref == 'refs/heads/main') }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

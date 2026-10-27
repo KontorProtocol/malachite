@@ -436,6 +436,10 @@ where
         )
     }
 
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_recursion generates the redundant attribute"
+    )]
     #[async_recursion]
     async fn process_buffered_msgs(
         &self,

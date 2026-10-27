@@ -15,7 +15,7 @@ concurrency:
 jobs:
   changes:
     name: Detect changes
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     permissions:
       pull-requests: read
     outputs:
@@ -28,12 +28,13 @@ jobs:
           filters: |
             code:
               - 'code/**'
+              - '.github/workflows/**'
 
   build:
     name: Build
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' || github.ref == 'refs/heads/main' }}
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     defaults:
       run:
         working-directory: code
@@ -43,8 +44,10 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
+          toolchain: 1.99.1
           cache-workspaces: "code"
       - name: Setup pages
+        if: github.repository == 'circlefin/malachite'
         id: pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Clean docs folder
@@ -61,8 +64,10 @@ jobs:
           path: code/target/doc
 
   deploy:
+    # Build and upload documentation on the fork without publishing upstream Pages.
+    if: github.repository == 'circlefin/malachite'
     name: Deploy
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     needs: build
     # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
     permissions:

@@ -17,6 +17,10 @@ use crate::Verifier;
 /// This trait extends the base [`Verifier`] functionality with methods for verifying
 /// certificates against validator sets. It is automatically implemented for any type
 /// that implements [`Verifier`].
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant attribute"
+)]
 #[async_trait]
 pub trait VerifierExt<Ctx>
 where

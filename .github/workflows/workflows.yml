@@ -1,0 +1,23 @@
+name: Workflow validation
+
+on:
+  pull_request:
+  push:
+    branches: main
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Validate workflow syntax and expressions
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output /tmp/actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz' | sha256sum --check
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint

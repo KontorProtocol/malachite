@@ -8,7 +8,7 @@ on:
 jobs:
   changes:
     name: Detect changes
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     permissions:
       pull-requests: read
     outputs:
@@ -22,15 +22,18 @@ jobs:
           filters: |
             code:
               - 'code/**'
+              - '.github/workflows/**'
             specs:
               - 'specs/**'
+              - '.github/workflows/**'
 
   mbt-tests:
     name: MBT Tests
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' || needs.changes.outputs.specs == 'true' || github.ref == 'refs/heads/main' }}
-    runs-on: github-hosted-large
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}
     env:
+      CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 1
       CARGO_PROFILE_RELEASE_DEBUG: 1
@@ -48,6 +51,8 @@ jobs:
         run: npm install -g @informalsystems/quint@0.27.0
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+        with:
+          toolchain: 1.99.1
       - name: Install cargo-nextest
         uses: taiki-e/install-action@554bdce7edf79d43854a6b7c1e392e7da7eb97a9 # cargo-nextest
       - name: Current time as random seed for Quint
@@ -57,12 +62,10 @@ jobs:
         run: |
           cargo nextest run \
            -p arc-malachitebft-test-mbt \
-           -p arc-malachitebft-starknet-test-mbt \
            --all-features --no-run
       - name: Run tests
         working-directory: code/crates/test/mbt
         run: |
           cargo nextest run \
            -p arc-malachitebft-test-mbt \
-           -p arc-malachitebft-starknet-test-mbt \
            --all-features
