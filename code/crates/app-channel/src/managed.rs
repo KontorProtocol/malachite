@@ -278,6 +278,7 @@ where
 {
     let runtime = Builder::new_multi_thread()
         .worker_threads(2)
+        .thread_name("malachite-rt")
         .enable_all()
         .build()
         .map_err(|error| ManagedEngineError::Startup(error.to_string()))?;

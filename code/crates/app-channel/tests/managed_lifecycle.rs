@@ -173,8 +173,8 @@ fn count_after_exits(
     for (path, stat) in &tasks {
         match stat {
             Ok(stat) => {
-                // comm may contain spaces and ')'. Fields 9 and 23 are flags
-                // and vsize; field 3 starts after the last closing parenthesis.
+                // comm may contain spaces and ')'. Field 9 is flags;
+                // field 3 starts after the last closing parenthesis.
                 let fields: Vec<_> = stat
                     .rsplit_once(')')
                     .unwrap()
@@ -182,8 +182,7 @@ fn count_after_exits(
                     .split_whitespace()
                     .collect();
                 let flags: u64 = fields[6].parse().unwrap();
-                let vsize: u64 = fields[20].parse().unwrap();
-                if flags & 0x4 != 0 && vsize == 0 {
+                if flags & 0x4 != 0 {
                     exiting.push(path);
                 } else {
                     live += 1;
@@ -198,7 +197,8 @@ fn count_after_exits(
     }
     let started = Instant::now();
     let mut polls = 0;
-    // Linux clears the join futex before removing the task from /proc.
+    // Linux clears the join futex before clearing mm or removing the /proc task.
+    // PF_EXITING is irreversible, even while vsize still describes the shared mm.
     // Preserve every initial live observation while waiting only for identified
     // exiting entries, so another live worker cannot disappear into this wait.
     while !exiting.is_empty() {
@@ -263,6 +263,7 @@ fn resource_probe_detects_live_thread() {
         let mut fields = vec!["0"; 21];
         fields[0] = "R";
         fields[6] = "4";
+        fields[20] = "577929216";
         tasks.push((
             PathBuf::from("exiting-probe"),
             Ok(format!("0 (exiting) {}", fields.join(" "))),
