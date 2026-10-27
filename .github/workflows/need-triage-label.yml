@@ -5,7 +5,9 @@ on:
 
 jobs:
   triage:
-    runs-on: github-hosted-small
+    # Upstream publication/issue automation has no destination in this fork.
+    if: github.repository == 'circlefin/malachite'
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -20,12 +22,12 @@ jobs:
 
             # Check if issue opener is in CODEOWNERS
             if echo "$CODEOWNERS" | grep -q "^${{ github.event.issue.user.login }}$"; then
-              echo "is_codeowner=true" >> $GITHUB_OUTPUT
+              echo "is_codeowner=true" >> "$GITHUB_OUTPUT"
             else
-              echo "is_codeowner=false" >> $GITHUB_OUTPUT
+              echo "is_codeowner=false" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "is_codeowner=false" >> $GITHUB_OUTPUT
+            echo "is_codeowner=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Add need-triage label

@@ -60,6 +60,10 @@ impl VerificationResult {
 /// each implementation can apply the correct domain separation (e.g. network-scoped
 /// for consensus messages, network-agnostic for validator proofs) without having
 /// to inspect raw bytes.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant attribute"
+)]
 #[async_trait]
 pub trait Verifier<Ctx>
 where
@@ -129,6 +133,10 @@ where
 /// Every signing method names the *purpose* of what it is signing, so that each
 /// implementation can apply the correct domain separation without having to inspect
 /// raw bytes.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant attribute"
+)]
 #[async_trait]
 pub trait Signer<Ctx>
 where

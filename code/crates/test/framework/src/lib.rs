@@ -184,6 +184,10 @@ where
     check_results(results);
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant attribute"
+)]
 #[async_trait]
 pub trait NodeRunner<Ctx>
 where

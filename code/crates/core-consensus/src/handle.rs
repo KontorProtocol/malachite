@@ -36,6 +36,10 @@ where
     handle_input(&co, state, metrics, input).await
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_recursion generates the redundant attribute"
+)]
 #[async_recursion]
 async fn handle_input<Ctx>(
     co: &Co<Ctx>,

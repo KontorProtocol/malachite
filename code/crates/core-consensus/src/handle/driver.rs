@@ -16,6 +16,10 @@ use crate::Role;
 
 use super::propose::on_propose;
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_recursion generates the redundant attribute"
+)]
 #[async_recursion]
 pub async fn apply_driver_input<Ctx>(
     co: &Co<Ctx>,

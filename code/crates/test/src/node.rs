@@ -13,6 +13,10 @@ use malachitebft_signing::{Signer, Verifier};
 
 pub use libp2p_identity::Keypair;
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant attribute"
+)]
 #[async_trait]
 pub trait NodeHandle<Ctx>
 where
@@ -23,6 +27,10 @@ where
     async fn kill(&self, reason: Option<String>) -> eyre::Result<()>;
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant attribute"
+)]
 #[async_trait]
 pub trait Node {
     type Context: Context;
