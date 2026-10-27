@@ -14,6 +14,8 @@ pub use malachitebft_app as app;
 
 mod builder;
 mod connector;
+mod managed;
+pub use managed::{ManagedEngine, ManagedEngineError};
 pub mod spawn;
 
 mod msgs;

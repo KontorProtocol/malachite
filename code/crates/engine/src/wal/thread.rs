@@ -29,14 +29,30 @@ pub enum WalMsg<Ctx: Context> {
 
 pub fn spawn<Ctx, Codec>(
     span: tracing::Span,
+    log: wal::Log,
+    codec: Codec,
+    rx: mpsc::Receiver<WalMsg<Ctx>>,
+    node: NodeRef,
+) -> JoinHandle<Result<(), String>>
+where
+    Ctx: Context,
+    Codec: WalCodec<Ctx>,
+{
+    spawn_with_final_flush(span, log, codec, rx, node, wal::Log::flush)
+}
+
+fn spawn_with_final_flush<Ctx, Codec, Flush>(
+    span: tracing::Span,
     mut log: wal::Log,
     codec: Codec,
     mut rx: mpsc::Receiver<WalMsg<Ctx>>,
     node: NodeRef,
-) -> JoinHandle<()>
+    final_flush: Flush,
+) -> JoinHandle<Result<(), String>>
 where
     Ctx: Context,
     Codec: WalCodec<Ctx>,
+    Flush: FnOnce(&mut wal::Log) -> io::Result<()> + Send + 'static,
 {
     thread::spawn(move || {
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -50,23 +66,23 @@ where
 
             info!("WAL thread exiting");
 
-            // Task finished normally, stop the thread
+            let result = final_flush(&mut log)
+                .map_err(|error| format!("WAL shutdown flush failed: {error}"));
             drop(log);
+            result
         }));
 
-        if let Err(e) = result {
-            let reason = format_panic_reason(e.as_ref());
-            error!("WAL thread panicked: {reason}");
-
-            // The worker died mid-operation, so persistent state may be in an
-            // unknown condition: route to the Node's safety-hang path rather
-            // than let the orchestrator auto-restart (which could double-sign).
-            // The cast is thread-safe and non-blocking; if the Node is already
-            // gone it silently fails and we still exit the thread.
-            let _ = node.cast(NodeMsg::SafetyFailure(format!(
-                "WAL worker thread panicked: {reason}"
-            )));
+        let result = result.unwrap_or_else(|error| {
+            Err(format!(
+                "WAL worker thread panicked: {}",
+                format_panic_reason(error.as_ref())
+            ))
+        });
+        if let Err(reason) = &result {
+            error!(%reason, "WAL worker failed");
+            let _ = node.cast(NodeMsg::SafetyFailure(reason.clone()));
         }
+        result
     })
 }
 
@@ -309,5 +325,53 @@ fn wal_entry_type<Ctx: Context>(entry: &Input<Ctx>) -> &'static str {
         | Input::Propose(..)
         | Input::RoundCertificate(..)
         | Input::SyncValueResponse(..) => "Unpersisted",
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::io;
+
+    use malachitebft_metrics::{Metrics, SharedRegistry};
+    use malachitebft_test::codec::proto::ProtobufCodec;
+    use malachitebft_test::TestContext;
+    use malachitebft_wal::Log;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+    use tracing::Span;
+
+    use crate::node::Node;
+    use crate::wal::WorkerRegistry;
+
+    use super::{spawn_with_final_flush, WalMsg};
+
+    #[tokio::test]
+    async fn final_flush_failure_is_joined_and_releases_the_file_lock() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("shutdown.wal");
+        let registry = SharedRegistry::new(Default::default(), None);
+        let metrics = Metrics::register(&registry);
+        let (node, node_join) = Node::new(metrics, Span::none()).spawn().await.unwrap();
+        let (commands, receiver) = mpsc::channel::<WalMsg<TestContext>>(1);
+        let worker = spawn_with_final_flush(
+            Span::none(),
+            Log::open(&path).unwrap(),
+            ProtobufCodec,
+            receiver,
+            node.clone(),
+            |_log| Err(io::Error::other("injected final fsync failure")),
+        );
+        let workers = WorkerRegistry::default();
+        workers.handles.lock().unwrap().push(worker);
+        commands.send(WalMsg::Shutdown).await.unwrap();
+        drop(commands);
+        let errors = workers.join().unwrap_err();
+        assert_eq!(
+            errors,
+            ["WAL shutdown flush failed: injected final fsync failure"]
+        );
+        drop(Log::open(&path).expect("joined worker must have released its advisory lock"));
+        node.stop(None);
+        node_join.await.unwrap();
     }
 }

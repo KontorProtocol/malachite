@@ -150,6 +150,7 @@ mod tests {
                 assert!(reason.contains("wal_append"), "reason was: {reason}");
                 assert!(reason.contains("disk full"), "reason was: {reason}");
             }
+            NodeMsg::PrepareShutdown(_) => panic!("expected a safety failure"),
         }
         drop(msgs);
 
