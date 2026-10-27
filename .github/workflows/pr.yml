@@ -11,17 +11,17 @@ on:
 jobs:
   lint:
     name: Check PR title
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     permissions:
       pull-requests: read
     steps:
-      - uses: step-security/action-semantic-pull-request@9142b539761b0ed6761de569f3a5020a7462a7f3 # v5.5.6
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
   verify-signatures:
     name: Verify commit signatures
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     permissions:
       contents: read
       pull-requests: write

@@ -8,8 +8,10 @@ on:
 
 jobs:
   publish:
+    # Upstream publication/issue automation has no destination in this fork.
+    if: github.repository == 'circlefin/malachite'
     name: Publish to crates.io
-    runs-on: github-hosted-large
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-24.04' }}
     permissions:
       id-token: write
     steps:
@@ -18,6 +20,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
+          toolchain: 1.99.1
           cache-workspaces: "code"
       - name: Authenticate to crates.io
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3

@@ -11,8 +11,10 @@ on:
 
 jobs:
   update-todos:
+    # Upstream publication/issue automation has no destination in this fork.
+    if: github.repository == 'circlefin/malachite'
     name: Update TODOs and FIXMEs
-    runs-on: github-hosted-small
+    runs-on: ${{ vars.CI_RUNNER_SMALL || 'ubuntu-24.04' }}
     permissions:
       issues: write
       contents: read
