@@ -152,23 +152,141 @@ fn bound(runtime: &Runtime, channels: &Channels<TestContext>) {
 }
 
 #[cfg(target_os = "linux")]
-fn resources() -> (usize, usize) {
-    let tasks: Vec<_> = fs::read_dir("/proc/self/task")
+fn task_snapshot() -> Vec<(PathBuf, io::Result<String>)> {
+    fs::read_dir("/proc/self/task")
         .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    let files = fs::read_dir("/proc/self/fd").unwrap().count();
-    eprintln!(
-        "resource snapshot: {} tasks, {files} descriptors",
-        tasks.len()
-    );
-    for task in &tasks {
-        // A joined task may disappear between enumeration and these reads.
-        let comm = fs::read_to_string(task.join("comm"));
-        let stat = fs::read_to_string(task.join("stat"));
-        eprintln!("{}: comm={comm:?} stat={stat:?}", task.display());
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let stat = fs::read_to_string(path.join("stat"));
+            (path, stat)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn count_after_exits(
+    tasks: Vec<(PathBuf, io::Result<String>)>,
+    mut read_stat: impl FnMut(&Path) -> io::Result<String>,
+) -> usize {
+    let mut live = 0;
+    let mut exiting = Vec::new();
+    for (path, stat) in &tasks {
+        match stat {
+            Ok(stat) => {
+                // comm may contain spaces and ')'. Fields 9 and 23 are flags
+                // and vsize; field 3 starts after the last closing parenthesis.
+                let fields: Vec<_> = stat
+                    .rsplit_once(')')
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .collect();
+                let flags: u64 = fields[6].parse().unwrap();
+                let vsize: u64 = fields[20].parse().unwrap();
+                if flags & 0x4 != 0 && vsize == 0 {
+                    exiting.push(path);
+                } else {
+                    live += 1;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("reading task state: {error}"),
+        }
     }
-    (tasks.len(), files)
+    if !exiting.is_empty() {
+        eprintln!("exiting task snapshot: {tasks:?}");
+    }
+    let started = Instant::now();
+    let mut polls = 0;
+    // Linux clears the join futex before removing the task from /proc.
+    // Preserve every initial live observation while waiting only for identified
+    // exiting entries, so another live worker cannot disappear into this wait.
+    while !exiting.is_empty() {
+        exiting.retain(|path| match read_stat(path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => panic!("reading exiting task state: {error}"),
+        });
+        polls += 1;
+        assert!(
+            exiting.is_empty() || started.elapsed() < Duration::from_secs(1),
+            "joined tasks remained in /proc: {exiting:?}; snapshot: {:?}",
+            task_snapshot()
+        );
+        if !exiting.is_empty() {
+            thread::yield_now();
+        }
+    }
+    if polls > 0 {
+        eprintln!(
+            "joined task visibility: {polls} re-polls in {:?}",
+            started.elapsed()
+        );
+    }
+    live
+}
+
+#[cfg(target_os = "linux")]
+fn resources() -> (usize, usize) {
+    let files = fs::read_dir("/proc/self/fd").unwrap().count();
+    let tasks = count_after_exits(task_snapshot(), |path| {
+        fs::read_to_string(path.join("stat"))
+    });
+    (tasks, files)
+}
+
+fn assert_resources(baseline: (usize, usize), context: &str) {
+    let actual = resources();
+    #[cfg(target_os = "linux")]
+    if actual != baseline {
+        eprintln!("resource mismatch: {:?}", task_snapshot());
+    }
+    assert_eq!(actual, baseline, "{context}");
+}
+
+fn resource_probe_detects_live_thread() {
+    let baseline = resources();
+    let (ready, started) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let worker = thread::Builder::new()
+        .name("probe ) worker".into())
+        .spawn(move || {
+            ready.send(()).unwrap();
+            let _ = released.recv();
+        })
+        .unwrap();
+    started.recv().unwrap();
+    assert_resources((baseline.0 + 1, baseline.1), "live worker was hidden");
+    #[cfg(target_os = "linux")]
+    {
+        let mut tasks = task_snapshot();
+        let mut fields = vec!["0"; 21];
+        fields[0] = "R";
+        fields[6] = "4";
+        tasks.push((
+            PathBuf::from("exiting-probe"),
+            Ok(format!("0 (exiting) {}", fields.join(" "))),
+        ));
+        let mut release = Some(release);
+        let mut worker = Some(worker);
+        let observed = count_after_exits(tasks, |path| {
+            assert_eq!(path, Path::new("exiting-probe"));
+            drop(release.take());
+            worker.take().unwrap().join().unwrap();
+            Err(io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(
+            observed,
+            baseline.0 + 1,
+            "live worker disappeared into exit wait"
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop(release);
+        worker.join().unwrap();
+    }
+    assert_resources(baseline, "probe worker outlived join");
 }
 
 #[cfg(target_os = "macos")]
@@ -385,7 +503,7 @@ fn wal_failure_cases(runtime: &Runtime, directory: &Path, heartbeat: &AtomicU64)
         drop(release);
         drop(channels);
         drop(engine);
-        assert_eq!(resources(), baseline, "WAL fault/timeout leaked resources");
+        assert_resources(baseline, "WAL fault/timeout leaked resources");
     }
 }
 
@@ -488,7 +606,7 @@ fn actor_failure(runtime: &Runtime, directory: &Path, during_shutdown: bool) {
     drop(release);
     drop(channels);
     drop(engine);
-    assert_eq!(resources(), baseline, "actor failure leaked resources");
+    assert_resources(baseline, "actor failure leaked resources");
 }
 
 fn blocking_runtime_work(runtime: &Runtime, directory: &Path, heartbeat: &AtomicU64) {
@@ -525,7 +643,7 @@ fn blocking_runtime_work(runtime: &Runtime, directory: &Path, heartbeat: &Atomic
     drop(release);
     drop(channels);
     drop(engine);
-    assert_eq!(resources(), baseline, "Tokio blocking worker outlived join");
+    assert_resources(baseline, "Tokio blocking worker outlived join");
 }
 
 fn quiet_interface_watchers(runtime: &Runtime) {
@@ -553,10 +671,10 @@ fn quiet_interface_watchers(runtime: &Runtime) {
             let elapsed = started.elapsed();
             worst_drop = worst_drop.max(elapsed);
             assert!(
-                elapsed < Duration::from_secs(2),
+                elapsed < Duration::from_millis(500),
                 "quiet watcher drop took {elapsed:?}"
             );
-            assert_eq!(resources(), baseline, "quiet watcher leaked resources");
+            assert_resources(baseline, "quiet watcher leaked resources");
         }
     }
     println!("20 quiet interface watcher drops, worst latency {worst_drop:?}");
@@ -600,11 +718,7 @@ fn cancel_partial_startup(directory: &Path, heartbeat: &AtomicU64) {
     assert!(engine.wait_stopped(Duration::from_secs(10)).unwrap());
     drop(release);
     drop(engine);
-    assert_eq!(
-        resources(),
-        baseline,
-        "canceled partial startup leaked resources"
-    );
+    assert_resources(baseline, "canceled partial startup leaked resources");
 }
 
 fn panic_partial_startup(directory: &Path) {
@@ -632,7 +746,7 @@ fn panic_partial_startup(directory: &Path) {
         Err(ManagedEngineError::Panic)
     );
     drop(engine);
-    assert_eq!(resources(), baseline, "startup panic leaked resources");
+    assert_resources(baseline, "startup panic leaked resources");
 }
 
 #[test]
@@ -676,10 +790,9 @@ fn real_engines_release_ports_workers_metrics_and_pending_replies() {
         let baseline = resources();
         for iteration in 0..20 {
             assert_eq!(cycle(&runtime, &address, &wal, &heartbeat), families);
-            assert_eq!(
-                resources(),
+            assert_resources(
                 baseline,
-                "resource growth in cycle {iteration}, quic={quic}"
+                &format!("resource growth in cycle {iteration}, quic={quic}"),
             );
             if quic {
                 drop(UdpSocket::bind(("0.0.0.0", port)).unwrap());
@@ -693,8 +806,9 @@ fn real_engines_release_ports_workers_metrics_and_pending_replies() {
             Err(ManagedEngineError::Startup(_))
         ));
         drop(failed);
-        assert_eq!(resources(), baseline, "partial startup leaked resources");
+        assert_resources(baseline, "partial startup leaked resources");
     }
+    resource_probe_detects_live_thread();
     wal_failure_cases(&runtime, &directory.0, &heartbeat);
     for during_shutdown in [false, true] {
         actor_failure(&runtime, &directory.0, during_shutdown);

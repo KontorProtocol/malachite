@@ -139,8 +139,8 @@ WAL workers and per-engine metrics. On Linux it currently passes:
   cannot complete while that task is blocked, and the outer runtime stays alive.
 - Twenty direct interface-watcher drops, both immediate and after settling. Linux
   netlink descriptors return to baseline without requiring interface changes.
-  The same test checks the Apple watcher thread and drop latency on macOS, where
-  it has not yet run.
+  The same test checks the Apple watcher thread and drop latency on macOS.
+  Initial macOS platform CI passed; final-head qualification remains required.
 
 - Cancellation during partial startup while real actors, WAL and network already
   exist. A blocked builder keeps the owner alive, prevents channel delivery, and
@@ -173,9 +173,9 @@ Full-workspace all-target, all-feature Clippy passes on the WAL correction. Exis
 async-recursion macros required narrowly scoped redundant-must-use lint
 annotations for that compiler; their generated behavior is unchanged.
 
-Outstanding before F3 review/PR: qualify macOS watcher ownership, run the broader
-fork checks, and adapt inherited upstream-only CI runner/policy configuration for
-this fork. The lifecycle implementation is being recorded for review; no F3 PR
+Outstanding before F3 PR: resolve the Linux resource-observation failure below,
+qualify the final head on all three platforms, run the broader fork checks, and
+merge the reviewed fork CI prerequisite. The lifecycle implementation is being recorded for review; no F3 PR
 has been created.
 
 Kontor PR https://github.com/KontorProtocol/Kontor/pull/605 corrected the post-F2
@@ -228,8 +228,67 @@ The F3 CI workflow is prepared for real lifecycle and engine-unit tests on
 ubuntu-24.04, ubuntu-24.04-arm and macos-latest with Rust 1.99.1. It verifies
 vendor provenance on every platform, and its path triggers include code/vendor
 and tools/lifecycle-vendor changes. Feature-branch pushes allow qualification
-before opening the reviewed PR. Platform results are not yet available.
+before opening the reviewed PR. Initial platform results are recorded below.
 The F3-2 notification regression and all 54 engine tests pass locally; affected
 all-target/all-feature Clippy also passes after the Drop diagnostic.
 Fork CI prerequisite PR: https://github.com/KontorProtocol/malachite/pull/2.
 F3 must rebase on its verified merge before PR completion.
+
+
+## Platform qualification and Linux resource observation
+
+Run 40498425174 at `18e2e745dba69fd6fdf986d9706c866bd4f0e43d` passed
+on Linux ARM and macOS, including all 54 engine unit tests per platform.
+The macOS lifecycle fixture took 58.12s; its worst of twenty quiet watcher drops
+was 581.417 microseconds. The drop bound is tightened from two seconds to 500ms,
+which still covers the 100ms run-loop backstop with scheduling margin.
+Linux x86 failed after an injected actor panic with six threads against a
+five-thread baseline, while all twelve file descriptors were already at baseline.
+
+Diagnostic head `5b2642e66b9c07227abc3b259ed6458a1113aa89` preserves those
+immediate assertions and names the outer test runtime. The local fixture then
+reproduced the same symptom after a WAL panic: the extra task was the joined
+`malachite-engin` owner thread, flags 4194380 (`0x40004c`, including
+`PF_EXITING`), with zero vsize and all address-space fields cleared. The test
+runtime workers and other baseline tasks were unchanged. A separate 20,000-run
+standard-thread spawn/join probe saw this visibility delay 576 times, with a
+maximum 202.377 microseconds.
+
+Linux clears the join futex during address-space release before removing the
+thread's proc entry. The measurement omits entries already gone during stat reads and waits at most
+one second for identified entries with both PF_EXITING and zero vsize to disappear.
+It freezes the initially observed live-thread count while waiting, so a second
+live worker cannot disappear into an unrelated exit wait. It applies the same
+rule to baselines. Live extra threads are never waited
+out; descriptors are counted before the wait and still compared immediately.
+The parser splits after the last ')' so thread names containing spaces or
+parentheses cannot shift the fields. A real blocked extra-thread control proves
+that the measurement still detects a live worker. A mixed control releases and
+joins that real worker during a simulated exiting-entry wait and requires its
+initial live observation to remain counted. Waits, timeouts and mismatches
+retain task-state diagnostics; successful waits report re-poll count and elapsed
+time. This changes test observation only, not engine shutdown or joining.
+
+Primary kernel sources:
+- https://github.com/torvalds/linux/blob/v6.8/kernel/exit.c
+- https://github.com/torvalds/linux/blob/v6.8/fs/proc/array.c
+
+The narrower measurement rule was agreed with the reviewer in receipt
+`81fe17a4ee6cbed5c263e574f31ff067`. Final local and platform results, including
+re-poll counts, are pending. The first platform run is not final merge evidence.
+
+Independent follow-up found that re-enumerating all tasks during a wait could
+hide another worker that was initially live. That first proposed observer was
+never committed or pushed. Its Interlink approval `77c48f41e9f2f3b05f2b373471467cc7`
+is withdrawn and superseded by `15533d850d739eba00bd1068d1ffb9f0` for the fixed
+initial-observation implementation. Independent follow-up also approved the fix.
+The final local fixture passed in 54.20s, including the mixed live/exiting control;
+all-target/all-feature app-channel Clippy passed. Worst local watcher drop was
+9.209 microseconds. The mixed control required one re-poll in 21.75 microseconds;
+this is injected-control evidence, not a measured kernel-exit delay. Final-head
+platform CI must record real exiting-task waits separately.
+
+Diagnostic run 40500496729 at `5b2642e6` passed Linux x86 and macOS. Linux ARM
+captured the same exit window at QUIC cycle two: extra owner task flags
+`0x40004c`, zero vsize, twelve file descriptors already at baseline. This further
+supports the measurement correction; the diagnostic run itself remains failed.
