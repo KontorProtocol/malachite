@@ -11,8 +11,9 @@ Plan agreement: Interlink receipt `01c5ded19810e657570fde30732c5b58`, accepted i
 The inherited Circlefin runner labels have no matching runners in the Kontor
 fork (GitHub runner API returned zero). Jobs now use repository variables
 `CI_RUNNER_SMALL` and `CI_RUNNER_LARGE`, falling back to `ubuntu-24.04`.
-Set either variable to another Linux x86 runner label when necessary. The workflow
-validator downloads the Linux x86 actionlint binary, so its runner must match.
+Set either variable to another appropriate runner label when necessary. The
+workflow validator is explicitly pinned to ubuntu-24.04 x86 to match its
+checksum-pinned Linux x86 actionlint binary.
 
 Rust qualification and Clippy use exactly Rust 1.99.1. The MSRV job still uses
 cargo-msrv to verify the version declared by the crate, currently 1.88, independently
@@ -37,7 +38,9 @@ available. None of these guards constitute passing publication/coverage-upload
 evidence for the fork.
 
 The fork PR gate checks that the PR author has write, maintain or admin access to
-KontorProtocol/malachite. Upstream's contribution gate stays unchanged under its
+KontorProtocol/malachite. Bot authors without those collaborator permissions,
+including Dependabot, fail this policy; the fork currently uses maintainer-authored
+PRs. Upstream's contribution gate stays unchanged under its
 own repository guard. Title validation and verified-commit checks are retained.
 Sign with an existing registered local key when available. GitHub's
 createCommitOnBranch API can also automatically sign commits, but this session's
