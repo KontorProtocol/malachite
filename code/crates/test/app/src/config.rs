@@ -115,6 +115,8 @@ pub fn load_config(path: impl AsRef<Path>, prefix: Option<&str>) -> eyre::Result
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -122,10 +124,13 @@ mod tests {
         let file = include_str!("../config.toml");
         let _config = toml::from_str::<Config>(file).unwrap();
 
-        let tmp_file = std::env::temp_dir().join("config-test.toml");
+        // Both the library and binary compile this test; nextest runs them in
+        // separate processes, so a shared filename races with the other's cleanup.
+        let directory = tempdir().unwrap();
+        let tmp_file = directory.path().join("config.toml");
         std::fs::write(&tmp_file, file).unwrap();
 
         let _config = load_config(&tmp_file, None).unwrap();
-        std::fs::remove_file(tmp_file).unwrap();
+        directory.close().unwrap();
     }
 }
