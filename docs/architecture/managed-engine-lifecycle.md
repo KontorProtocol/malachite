@@ -27,9 +27,11 @@ which permit unfinished work to survive the return.
   failures rather than reporting clean shutdown.
 - Drop the runtime on its dedicated thread, outside any entered async context.
   Runtime destruction owns nested Tokio tasks, including libp2p/quinn tasks.
-  Nested actors must own only runtime resources: any non-runtime resource or
-  durable writer needing final flush must register an explicit lifecycle owner,
-  as the WAL does. Thread/descriptor baselines guard this audited ownership rule.
+  Any non-runtime resource created per engine, including a durable writer needing
+  final flush, must register an explicit lifecycle owner, as the WAL does.
+  Process-lifetime services have a separate explicit contract below; they cannot
+  retain engine authority or per-engine resources after teardown. Thread/descriptor
+  baselines guard this audited ownership rule.
   Dropping ManagedEngine in a Tokio runtime context logs an error before joining;
   the guard does not panic or abandon ownership.
 - Preserve a single join owner across timeout and cancellation. A panic or
@@ -292,3 +294,35 @@ Diagnostic run 40500496729 at `5b2642e6` passed Linux x86 and macOS. Linux ARM
 captured the same exit window at QUIC cycle two: extra owner task flags
 `0x40004c`, zero vsize, twelve file descriptors already at baseline. This further
 supports the measurement correction; the diagnostic run itself remains failed.
+
+
+## Explicit process-lifetime services
+
+The locked futures-timer 3.0.3 fallback creates one helper lazily per independently
+linked crate graph. `TimerHandle::default` deliberately forgets its helper's join
+handle after winning the fallback registration. That helper parks between events
+and owns a timer heap; it holds no sockets or file descriptors and does not poll
+engine futures. It only wakes task wakers. Destroying the runtime drops the
+engine's Delay futures: Delay::drop clears each deadline, queues its cancellation
+and wakes the helper, whose poll removes the heap entry. Physical reclamation of
+canceled notification records is asynchronous; this is not a claim that the timer
+heap is synchronously empty at engine join. A stale Tokio waker cannot execute an
+already destroyed engine future or restore its signing/storage authority.
+
+This helper is bundle-resident, not recreated or joined at each engine handoff.
+K1 records its ownership per consensus graph, forbids cross-graph fallback sharing,
+and keeps each graph resident for the node process lifetime. Wasmtime's separately
+recorded per-graph Rayon pool and resident signal handlers follow their F1 ownership
+contracts. These are named exceptions, not permission to detach new engine workers.
+Any new service exception needs an explicit review showing bounded growth per
+graph, no retained per-engine state or authority after teardown, and no leaked
+engine descriptors. The repeated-cycle resource test remains mandatory.
+
+K5/K7 node resource tests must warm each relevant graph with an engine start/stop
+before taking their stable baseline. They must not tolerate an unexplained extra
+thread per engine. Current evidence shows the same futures-timer helper across
+repeated cycles. Documentation clarification agreed in Interlink receipt
+`33e55cc703d83f1c0e077ae28de25ac8`; no production behavior changes.
+
+Source: futures-timer 3.0.3 native/global.rs, native/timer.rs and native/delay.rs
+from the checksum-locked registry package in code/Cargo.lock.
