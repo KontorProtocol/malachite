@@ -528,7 +528,22 @@ control took one re-poll in 53.561 microseconds. Semver run 40510810622 passed t
 explicit major-release policy for all nine checked packages (zero checks, 260
 skips each, as explained above). MBT, Quint and CodeQL also passed.
 
-Post-merge main qualification is still running at this documentation checkpoint:
-Rust 40515844978, lifecycle 40515845031 and coverage 40515845071. F3 and the earlier
-bootstrap main gate close only after the applicable post-merge jobs pass. K1's
-combined-graph ownership and host-signal acceptance gates remain separate.
+Post-merge Rust run 40515844978 failed the unchanged test-app configuration test.
+Both the library and binary compile config.rs, so nextest runs two copies of
+`parse_default_config_file` in separate processes against the same temporary
+`config-test.toml`. The binary finished first; the library then failed to remove
+the file with NotFound. The other 760 tests passed, including the complete managed
+lifecycle fixture in 54.215 seconds. This run remains failed, not retried green.
+
+A separate test-only correction gives each invocation a tempfile directory,
+preserving the .toml extension and explicit checked cleanup. No production loader
+code changes. The existing locked tempfile package is added as a direct test
+dependency; all other lock entries are identical. Fifty concurrent lib/bin pairs
+before the fix produced six failures out of 100 invocations: missing files and
+reading during a competing write. The same 50-pair check after the fix passed all
+100 invocations. The package's two nextest cases also pass without retries.
+
+F3 and the earlier bootstrap main gate close only after the corrective PR's
+applicable exact-head and post-merge jobs pass. Lifecycle run 40515845031 and
+coverage 40515845071 remain separately tracked. K1's combined-graph ownership
+and host-signal acceptance gates remain separate.
