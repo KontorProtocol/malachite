@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 0.9.0-kontor.1 (Kontor fork)
+
+Fork CI compares the PR against its merge base. Unchanged numeric versions,
+including changes only to the prerelease suffix, permit additive APIs but reject
+breaking changes. For this 0.x line, incompatible changes need a numeric minor
+bump (for example, 0.9 to 0.10) and a migration entry here. The checker receives
+this policy explicitly because its default treats unchanged prereleases as major.
+
+This fork identity is based on upstream 0.8.2 and deliberately declares a
+semver-major API change. It is not an upstream Malachite 0.9 release.
+
+### `arc-malachitebft-engine`
+
+- `node::NodeMsg` adds `PrepareShutdown(RpcReplyPort<()>)`. Exhaustive matches must
+  handle the shutdown barrier. Its reply port also means the enum no longer
+  implements `UnwindSafe` or `RefUnwindSafe`; callers must not assume those traits
+  when establishing their panic boundaries.
+- `wal::Args` adds `workers: Option<WorkerRegistry>`. Existing unmanaged struct
+  literals should supply `None`. Managed integrations should use
+  `EngineBuilder::start_managed`, which registers and joins the WAL worker as part
+  of the complete managed lifecycle.
+
+All workspace crates and their internal path requirements use the same fork
+version. Third-party lock records are unchanged by this identity update. The
+network and discovery protocol names and Identify agent identity remain explicitly
+configured; they are not derived from Cargo package versions. Only the test CLI's
+reported package version changes. This API bump itself does not partition peers.
+
+Kontor's later consensus bundles must pin this fork's exact revision and request
+`=0.9.0-kontor.1` explicitly where a version requirement is specified. It does not
+satisfy an existing `0.8.2` patch requirement. Do not silently reuse the old version
+or suppress the compatibility checks. Wasmtime's retained-version/native-suffix
+identity and the cryptography namespace variable have separate ownership rules
+and are unaffected by this Malachite version.
+
 ## 0.8.1
 
 *October 6th, 2026*

@@ -1,0 +1,109 @@
+--- a/src/apple.rs
++++ b/src/apple.rs
+@@ -1,6 +1,6 @@
+ use crate::{IfEvent, IpNet, Ipv4Net, Ipv6Net};
+ use core_foundation::array::CFArray;
+-use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
++use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
+ use core_foundation::string::CFString;
+ use fnv::FnvHashSet;
+ use futures::channel::mpsc;
+@@ -9,7 +9,11 @@
+ use std::collections::VecDeque;
+ use std::io::{Error, Result};
+ use std::pin::Pin;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Mutex};
+ use std::task::{Context, Poll};
++use std::thread::{self, JoinHandle};
++use std::time::Duration;
+ use system_configuration::dynamic_store::{
+     SCDynamicStore, SCDynamicStoreBuilder, SCDynamicStoreCallBackContext,
+ };
+@@ -39,16 +43,18 @@
+     addrs: FnvHashSet<IpNet>,
+     queue: VecDeque<IfEvent>,
+     rx: mpsc::Receiver<()>,
++    _worker: Worker,
+ }
+ 
+ impl IfWatcher {
+     pub fn new() -> Result<Self> {
+         let (tx, rx) = mpsc::channel(1);
+-        std::thread::spawn(|| background_task(tx));
++        let worker = Worker::spawn(tx)?;
+         let mut watcher = Self {
+             addrs: Default::default(),
+             queue: Default::default(),
+             rx,
++            _worker: worker,
+         };
+         watcher.resync()?;
+         Ok(watcher)
+@@ -137,7 +143,47 @@
+     }
+ }
+ 
+-fn background_task(tx: mpsc::Sender<()>) {
++#[derive(Debug, Default)]
++struct Shutdown {
++    stopped: AtomicBool,
++    run_loop: Mutex<Option<CFRunLoop>>,
++}
++
++#[derive(Debug)]
++struct Worker {
++    shutdown: Arc<Shutdown>,
++    thread: Option<JoinHandle<()>>,
++}
++
++impl Worker {
++    fn spawn(tx: mpsc::Sender<()>) -> Result<Self> {
++        let shutdown = Arc::new(Shutdown::default());
++        let worker_shutdown = Arc::clone(&shutdown);
++        let thread = thread::Builder::new()
++            .name("if-watch".into())
++            .spawn(move || background_task(tx, worker_shutdown))?;
++        Ok(Self {
++            shutdown,
++            thread: Some(thread),
++        })
++    }
++}
++
++impl Drop for Worker {
++    fn drop(&mut self) {
++        self.shutdown.stopped.store(true, Ordering::Release);
++        if let Some(run_loop) = self.shutdown.run_loop.lock().unwrap().as_ref() {
++            run_loop.stop();
++        }
++        if let Some(thread) = self.thread.take() {
++            if thread.join().is_err() {
++                log::error!("Interface watcher thread panicked");
++            }
++        }
++    }
++}
++
++fn background_task(tx: mpsc::Sender<()>, shutdown: Arc<Shutdown>) {
+     let Some(store) = SCDynamicStoreBuilder::new("global-network-watcher")
+         .callback_context(SCDynamicStoreCallBackContext {
+             callout: callback,
+@@ -158,5 +204,15 @@
+     };
+     let run_loop = CFRunLoop::get_current();
+     run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+-    CFRunLoop::run_current();
+-}
++    *shutdown.run_loop.lock().unwrap() = Some(run_loop.clone());
++    while !shutdown.stopped.load(Ordering::Acquire) {
++        // Stop can race the entry into CFRunLoopRunInMode. The finite interval
++        // bounds that race even if no interface event ever arrives.
++        CFRunLoop::run_in_mode(
++            unsafe { kCFRunLoopDefaultMode },
++            Duration::from_millis(100),
++            false,
++        );
++    }
++    *shutdown.run_loop.lock().unwrap() = None;
++}

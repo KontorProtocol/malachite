@@ -1,7 +1,8 @@
 # Kontor fork CI prerequisite
 
-Status: implementation, local validation and both source reviews complete.
-The temporary policy bootstrap is recorded below; PR CI evidence is pending. This is a prerequisite PR before managed-engine phase F3.
+Status: PR2 merged, both temporary policy disables restored. Exact-head PR checks
+passed; post-merge main CI is running. This is the prerequisite before managed-engine
+phase F3. Earlier ledger entries below are retained as point-in-time evidence.
 Base: `2b3e1adf19d90e7289ed064501ca4dd74ca3027d`.
 Plan agreement: Interlink receipt `01c5ded19810e657570fde30732c5b58`, accepted in
 `4603fdb96bf63129ec8f2a74e3cce822` (B1 through B5).
@@ -156,3 +157,36 @@ both baseline and candidate rustdoc generation/parsing under Rust 1.99.1. The
 existing failure gate remains enabled. All 47 Quint files also typecheck under
 0.27.0. Exact-head CI remains required.
 Release: https://github.com/obi1kenobi/cargo-semver-checks/releases/tag/v0.51.0
+
+
+### Verified merge and policy restoration
+
+PR2 merged at 2026-10-27T12:43:09Z as
+`0821ca5ebbe29d538a2e7edbd49990010da8326d`. Reviewed head
+`5985ce345cfe04f1c492b3bba02c0aa7bb88e017` and fetched merge both have tree
+`42959021457ea953b49613d1debe51f17c43941c`.
+All substantive exact-head checks passed. The upstream-only Codecov upload was
+skipped as designed; coverage generation and its downloadable artifact passed.
+
+Actual CI counts at that head:
+- Rust40501768767: unit756 passed/3 existing skips; maelstrom discovery22 passed/
+  1 ignored; application215 passed/5 ignored. Clippy, fmt, MSRV, standalone and
+  no_std also passed.
+- MBT40501768853:5 passed, none skipped.
+- Quint40501768702:47 files typechecked;89 cases across16 files passed with
+  max-samples100. Executed-file count16 matched discovery.
+- Semver40501768915: selected nine crates, successful check. Local output separately
+  records202 passing and58 inapplicable checks for each baseline/current comparison.
+- Coverage40501768736:993 passed/9 existing skips, one slow test, no second attempts.
+  Report generated and artifact12735190817 uploaded (71,974 bytes).
+- CodeQL40501761038: actions, Python and Rust analyses passed.
+
+Immediately after merge, policy workflows were re-enabled and verified active:
+- PR Gate309324264:2026-10-27T12:43:11.583759Z.
+- PR309324265:2026-10-27T12:43:12.374657Z.
+No policy remains disabled. The F3 PR must prove both restored policies pass.
+
+Post-merge runs, still pending at this ledger entry: Rust40505982903,
+Coverage40505982840, MBT40505982846, Quint40505982801, Docs40505982849 and
+main analysis40505982129. Workflow validation40505982920 and spelling40505982816
+already passed. Upstream-only TODO automation40505982832 was skipped as designed.

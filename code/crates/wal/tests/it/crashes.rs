@@ -1,9 +1,8 @@
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
@@ -11,6 +10,9 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use testdir::{NumberedDir, NumberedDirBuilder};
 
+use arc_malachitebft_wal::log::constants::{
+    ENTRY_COMPRESSION_FLAG_SIZE, ENTRY_LENGTH_SIZE, HEADER_SIZE,
+};
 use arc_malachitebft_wal::log::Log;
 use arc_malachitebft_wal::Log as FileLog;
 use arc_malachitebft_wal::*;
@@ -288,50 +290,84 @@ fn wal_write_test() {
 }
 
 #[test]
-fn concurrent_crash_recovery() -> io::Result<()> {
-    let path = testwal!();
-    let path_clone = path.clone();
+fn torn_tail_recovery_preserves_complete_prefix() -> io::Result<()> {
+    let directory = testdir!();
+    let prefix = b"committed prefix";
+    let replacement = b"append after recovery";
+    for size in [1, 257] {
+        let source = directory.join(format!("source-{size}.wal"));
+        let mut wal = FileLog::open(&source)?;
+        wal.write_raw(prefix)?;
+        wal.flush()?;
+        let prefix_len = fs::metadata(&source)?.len() as usize;
+        wal.write_raw(vec![0x5a; size])?;
+        wal.flush()?;
+        drop(wal);
+        let complete = fs::read(source)?;
 
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    // Writer thread
-    let writer_handle = thread::spawn(move || -> io::Result<()> {
-        let mut wal = FileLog::open(&path_clone)?;
-
-        while running_clone.load(Ordering::SeqCst) {
-            wal.append(b"test entry")?;
-            wal.flush()?;
-            thread::sleep(Duration::from_millis(10));
+        // Stop the writer before modeling an interrupted last append. Recovery
+        // truncates incomplete flags, lengths, CRCs and payloads to this prefix.
+        for cut in prefix_len..complete.len() {
+            let path = directory.join(format!("cut-{size}-{cut}.wal"));
+            fs::write(&path, &complete[..cut])?;
+            let mut recovered = FileLog::open(&path)?;
+            assert_eq!(fs::metadata(&path)?.len(), prefix_len as u64);
+            let entries = recovered.iter()?.collect::<io::Result<Vec<_>>>()?;
+            assert_eq!(entries, vec![prefix.to_vec()], "size={size}, cut={cut}");
+            recovered.append(replacement)?;
+            recovered.flush()?;
+            drop(recovered);
+            assert_eq!(
+                verify_wal_integrity(&path)?,
+                vec![prefix.to_vec(), replacement.to_vec()],
+                "size={size}, cut={cut}"
+            );
         }
-
-        Ok(())
-    });
-
-    // Crasher thread
-    let path2 = path.clone();
-    let crasher_handle = thread::spawn(move || {
-        for _ in 0..5 {
-            thread::sleep(Duration::from_millis(50));
-
-            // Simulate crash by truncating file
-            if let Ok(file) = OpenOptions::new().write(true).open(&path2) {
-                let _ = file.set_len(12); // Truncate to header size
-            }
-        }
-        running.store(false, Ordering::SeqCst);
-    });
-
-    writer_handle.join().unwrap()?;
-    crasher_handle.join().unwrap();
-
-    // Verify final WAL integrity
-    let entries = verify_wal_integrity(&path)?;
-
-    // The WAL should be in a consistent state
-    for entry in entries {
-        assert_eq!(&entry, b"test entry");
     }
+    Ok(())
+}
 
+#[test]
+fn external_truncation_during_append_is_rejected() -> io::Result<()> {
+    let directory = testdir!();
+    let source = directory.join("source.wal");
+    let mut wal = FileLog::open(&source)?;
+    wal.write_raw(b"test entry")?;
+    wal.flush()?;
+    drop(wal);
+    let complete = fs::read(source)?;
+    let header = HEADER_SIZE as usize;
+    let split = header + (ENTRY_COMPRESSION_FLAG_SIZE + ENTRY_LENGTH_SIZE) as usize;
+    let path = directory.join("externally-truncated.wal");
+    fs::write(&path, &complete[..header])?;
+
+    // Reproduce write_entry's write ordering with a raw writer so a second
+    // handle can truncate exactly after the length, bypassing the advisory lock.
+    // Its cursor stays past EOF; the CRC and payload then leave a zero-filled
+    // hole. This is external mutation, not a crash that stopped the writer.
+    let mut writer = OpenOptions::new().write(true).open(&path)?;
+    writer.seek(SeekFrom::End(0))?;
+    writer.write_all(&complete[header..split])?;
+    OpenOptions::new()
+        .write(true)
+        .open(&path)?
+        .set_len(HEADER_SIZE)?;
+    writer.write_all(&complete[split..])?;
+    writer.sync_all()?;
+    drop(writer);
+    assert_eq!(
+        verify_wal_integrity(&path).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+
+    // A later valid append must not turn a corrupt prefix into accepted history.
+    let mut wal = FileLog::open(&path)?;
+    wal.append(b"later valid entry")?;
+    wal.flush()?;
+    drop(wal);
+    assert_eq!(
+        verify_wal_integrity(&path).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
     Ok(())
 }

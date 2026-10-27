@@ -22,6 +22,7 @@ byzantine = ["dep:malachitebft-engine-byzantine"]
 bytes.workspace = true
 derive-where.workspace = true
 eyre.workspace = true
+futures.workspace = true
 ractor.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
@@ -37,5 +38,8 @@ malachitebft-signing.workspace = true
 workspace = true
 
 [dev-dependencies]
+if-watch = { version = "=3.2.2", features = ["tokio"] }
+malachitebft-core-consensus.workspace = true
+malachitebft-wal.workspace = true
 malachitebft-test = { package = "arc-malachitebft-test", path = "../test" }
 rand.workspace = true

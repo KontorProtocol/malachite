@@ -1,6 +1,8 @@
 use std::borrow::Cow;
+use std::fmt::{Error, Write};
 use std::sync::{Arc, OnceLock, RwLock};
 
+use prometheus_client::encoding::text::encode;
 pub use prometheus_client::registry::Registry;
 
 #[derive(Clone)]
@@ -43,6 +45,11 @@ impl SharedRegistry {
         }
     }
 
+    /// Export only this registry, allowing an owner to select its live engine.
+    pub fn export<W: Write>(&self, writer: &mut W) -> Result<(), Error> {
+        self.read(|registry| encode(writer, registry))
+    }
+
     fn read<A>(&self, f: impl FnOnce(&Registry) -> A) -> A {
         f(&self.registry.read().expect("poisoned lock"))
     }
@@ -57,8 +64,6 @@ fn global_registry() -> &'static SharedRegistry {
     REGISTRY.get_or_init(|| SharedRegistry::new(Registry::default(), None))
 }
 
-pub fn export<W: core::fmt::Write>(writer: &mut W) {
-    use prometheus_client::encoding::text::encode;
-
-    SharedRegistry::global().read(|registry| encode(writer, registry).unwrap())
+pub fn export<W: Write>(writer: &mut W) {
+    SharedRegistry::global().export(writer).unwrap()
 }

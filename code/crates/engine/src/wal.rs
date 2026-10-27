@@ -1,6 +1,8 @@
 use std::io;
 use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use eyre::eyre;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
@@ -49,9 +51,63 @@ where
         span: tracing::Span,
         node: NodeRef,
     ) -> Result<WalRef<Ctx>, SpawnErr> {
-        let (actor_ref, _) =
-            Actor::spawn(None, Self::new(span), Args { path, codec, node }).await?;
+        let (actor_ref, _) = Actor::spawn(
+            None,
+            Self::new(span),
+            Args {
+                path,
+                codec,
+                node,
+                workers: None,
+            },
+        )
+        .await?;
         Ok(actor_ref)
+    }
+
+    pub async fn spawn_tracked(
+        codec: Codec,
+        path: PathBuf,
+        span: tracing::Span,
+        node: NodeRef,
+        workers: WorkerRegistry,
+    ) -> Result<WalRef<Ctx>, SpawnErr> {
+        let args = Args {
+            path,
+            codec,
+            node,
+            workers: Some(workers),
+        };
+        let (actor, _) = Actor::spawn(None, Self::new(span), args).await?;
+        Ok(actor)
+    }
+}
+
+type WorkerHandle = JoinHandle<Result<(), String>>;
+
+/// Owns WAL threads beyond actor failure and cancellation. Join only after the
+/// engine runtime has been destroyed, so every command sender has been dropped.
+#[derive(Clone, Default)]
+pub struct WorkerRegistry {
+    handles: Arc<Mutex<Vec<WorkerHandle>>>,
+}
+
+impl WorkerRegistry {
+    pub fn join(&self) -> Result<(), Vec<String>> {
+        let handles = self.handles.lock().unwrap().drain(..).collect::<Vec<_>>();
+        let mut errors = Vec::new();
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(error),
+                Err(_) => errors.push("WAL thread panicked outside its worker guard".into()),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -69,12 +125,13 @@ pub struct Args<Codec> {
     pub path: PathBuf,
     pub codec: Codec,
     pub node: NodeRef,
+    pub workers: Option<WorkerRegistry>,
 }
 
 pub struct State<Ctx: Context> {
     height: Ctx::Height,
     wal_sender: mpsc::Sender<self::thread::WalMsg<Ctx>>,
-    _handle: std::thread::JoinHandle<()>,
+    _handle: Option<WorkerHandle>,
 }
 
 impl<Ctx, Codec> Wal<Ctx, Codec>
@@ -255,6 +312,12 @@ where
         // consensus silently.
         let handle = self::thread::spawn(self.span.clone(), log, args.codec, rx, args.node);
 
+        let handle = if let Some(workers) = args.workers {
+            workers.handles.lock().unwrap().push(handle);
+            None
+        } else {
+            Some(handle)
+        };
         Ok(State {
             height: Ctx::Height::ZERO,
             wal_sender: tx,
