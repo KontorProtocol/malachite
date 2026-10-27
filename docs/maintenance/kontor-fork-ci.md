@@ -1,7 +1,7 @@
 # Kontor fork CI prerequisite
 
-Status: implementation and local validation complete, reviews pending. No PR or workflow setting
-has been changed yet. This is a prerequisite PR before managed-engine phase F3.
+Status: implementation, local validation and both source reviews complete.
+The temporary policy bootstrap is recorded below; PR CI evidence is pending. This is a prerequisite PR before managed-engine phase F3.
 Base: `2b3e1adf19d90e7289ed064501ca4dd74ca3027d`.
 Plan agreement: Interlink receipt `01c5ded19810e657570fde30732c5b58`, accepted in
 `4603fdb96bf63129ec8f2a74e3cce822` (B1 through B5).
@@ -80,7 +80,14 @@ https://docs.github.com/en/graphql/reference/commits#createcommitonbranch
 
 ## Execution ledger
 
-No policy workflow has been disabled. No prerequisite PR or merge exists yet.
+Both required source reviews approved exact head
+`d3fd6118cb67d68b86bb882bdf7ab1f4b4117320` against the stated base.
+Independent follow-up confirmed the Clippy correction and architecture pin with
+no remaining material findings. Interlink final approval is receipt
+`27a507d4fd1c4a81a2666622e5b23dcc`. GitHub verified the head signature as valid;
+remote and local tree are `a5d1438d6effba585e6de1995d1bf5b08060e077`.
+This ledger-only follow-up records source review and operational evidence.
+
 
 
 Independent review found the inherited actions-rs/clippy wrapper ignores Cargo's
@@ -89,3 +96,14 @@ Cargo emitting a valid lint error and exiting 101; the action printed the error
 but exited zero. The workflow now runs Cargo directly so compiler and lint
 failures fail the job. The full local Clippy command already passed with this
 scope. No test or compiler failure is converted to success by a wrapper.
+
+Policy bootstrap state (UTC, verified disabled_manually):
+- PR Gate, workflow ID `309324264`, disabled `2026-10-27T11:37:54.933867+00:00`.
+- PR, workflow ID `309324265`, disabled `2026-10-27T11:37:56.050199+00:00`.
+
+No other workflow was disabled. Re-enable these exact IDs immediately after the
+bootstrap merge and verify their active state. PR/current-head CI and post-main
+results are still pending. No merge has occurred.
+
+Do not reintroduce wrapper actions for compiler or lint steps unless their exit
+status propagates compiler/lint failures to the job.
