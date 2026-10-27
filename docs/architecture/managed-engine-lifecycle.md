@@ -1,8 +1,9 @@
 # Managed engine lifecycle (F3 implementation plan)
 
-Status: implementation in progress, with real-engine Linux lifecycle tests passing.
-Platform CI and broader fork qualification remain incomplete. Kontor protocol
-upgrade phase F3, fork base `2b3e1adf19d90e7289ed064501ca4dd74ca3027d`.
+Status: source reviews complete and all three platform runs passed before rebase.
+Final PR qualification remains pending. Kontor protocol upgrade phase F3,
+original fork base `2b3e1adf19d90e7289ed064501ca4dd74ca3027d`, now rebased onto
+verified CI bootstrap merge `0821ca5ebbe29d538a2e7edbd49990010da8326d`.
 Interlink agreement: `e4778a0e596aeb63d8a99dfe5144404d`.
 
 A managed engine owns a dedicated OS thread and Tokio runtime. Build all actors
@@ -154,7 +155,7 @@ WAL workers and per-engine metrics. On Linux it currently passes:
 - Panic during partial startup after actor creation. The panic remains observable
   after actor cleanup, runtime destruction and WAL joins, with resources at baseline.
 
-The latest complete lifecycle run passed in 54.34s, with worst Linux watcher drop
+The WAL-correction lifecycle run passed in 54.34s, with worst Linux watcher drop
 latency 10.542 microseconds. All 54 engine unit tests pass, including the new first
 safety-fault preservation and final WAL flush-failure cases. These are local
 observations, not cross-platform guarantees.
@@ -326,3 +327,31 @@ repeated cycles. Documentation clarification agreed in Interlink receipt
 
 Source: futures-timer 3.0.3 native/global.rs, native/timer.rs and native/delay.rs
 from the checksum-locked registry package in code/Cargo.lock.
+
+
+## Rebased source and complete pre-PR platform results
+
+All three jobs in run40501837563 passed at
+`cdc0ea41776bdf2135f0267ccbf2e3ea05e39785`, each with one complete real lifecycle
+fixture and all54 engine unit tests:
+
+| Platform | Lifecycle duration | Worst quiet watcher drop |
+| --- | --- | --- |
+| Linux x86 |54.12s|17.302 microseconds|
+| Linux ARM |54.13s|52.89 microseconds|
+| macOS |58.06s|702 microseconds|
+
+The x86 run observed an actual exiting engine owner, requiring two re-polls in
+42.008 microseconds. Its mixed control required one re-poll in59.05 microseconds.
+ARM observed only the injected mixed control, one re-poll in36.825 microseconds.
+These distinct cases are recorded separately; the real exit case satisfies the
+observer's platform-evidence gate (Interlink receipt99f1e7be669a96d47dbbfac8066079d1).
+
+The resident-timer prose was approved independently and by Interlink in
+558607a501a8b37c048f08e29465b558. Local doc head30a0d696 was then rebased onto
+bootstrap merge0821ca5e. All six commits were signed with the existing registered
+key. Rebased head6078090f has byte-identical code, tests, lifecycle vendor/tooling,
+platform workflow and lifecycle documentation to30a0d696. The only additions from
+rebase are the reviewed bootstrap CI files and its ledger. This following ledger
+update records the merge and restored policies. F3 PR CI must still run on its
+actual final head, including the restored collaborator/title/signature gates.
