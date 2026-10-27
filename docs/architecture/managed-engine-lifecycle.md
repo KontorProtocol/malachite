@@ -259,7 +259,9 @@ maximum 202.377 microseconds.
 
 Linux clears the join futex during address-space release before removing the
 thread's proc entry. The measurement omits entries already gone during stat reads and waits at most
-one second for identified entries with both PF_EXITING and zero vsize to disappear.
+one second for identified entries with PF_EXITING to disappear. The original
+observer also required zero vsize, which PR qualification showed was too strict
+(see the correction below).
 It freezes the initially observed live-thread count while waiting, so a second
 live worker cannot disappear into an unrelated exit wait. It applies the same
 rule to baselines. Live extra threads are never waited
@@ -355,3 +357,96 @@ platform workflow and lifecycle documentation to30a0d696. The only additions fro
 rebase are the reviewed bootstrap CI files and its ledger. This following ledger
 update records the merge and restored policies. F3 PR CI must still run on its
 actual final head, including the restored collaborator/title/signature gates.
+
+
+## Explicit fork API version
+
+The compatibility check on the initial F3 PR correctly found three major lint
+categories: NodeMsg adds PrepareShutdown, loses UnwindSafe/RefUnwindSafe through
+the reply port, and public wal::Args adds workers. These are intentional lifecycle
+API changes. The fork therefore uses `0.9.0-kontor.1`, semver-major relative to
+`0.8.2`, with migration guidance in BREAKING_CHANGES.md. All 30 own path-package
+versions and internal requirements change together; every third-party lock record
+remains identical. Reviewer agreement: e7c187468cbc46535e6445bfb800398b.
+
+For this declared major change, cargo-semver-checks reports zero checks and 260
+skips per package. That is version-policy acceptance, not API compatibility
+evidence. The checker stays enabled without lint exceptions. Because the fork is
+unpublished, future same-version changes must compare to fork source rather than
+the last upstream registry release. CI checks out the exact PR head with complete
+history, fetches the event's base SHA, and compares against their merge base. A
+baseline/check failure cannot silently pass the job. Upstream retains its registry
+baseline. Successful checker output is printed, including actual check/skip counts.
+
+The real negative control exposed a second default: checker 0.51.0 assumes a
+major release even for an unchanged prerelease identity. The fork now passes an
+explicit release type derived from numeric versions. Unchanged numeric versions
+(including suffix-only changes) permit additive APIs but require all major-level
+checks to pass. For the current 0.x line, incompatible changes require a numeric
+minor bump, such as 0.9 to 0.10. Numeric regressions fail. The actual same-version
+control removes a public function and must fail; retaining it and adding another
+must pass. The version policy has separate numeric/suffix/regression checks.
+The actual removal control ran 202 checks (201 pass, one failure, 58 skips), and
+the additive control ran 202 checks (all pass, 58 skips).
+
+Network/discovery source contains no CARGO_PKG_VERSION use. ProtocolNames defaults
+are fixed strings; Identify agent_version is built from caller-supplied identity,
+not the package version. The test CLI's command(version) reports the new identity.
+Wasmtime versioned native suffixes and F2's explicit crypto namespace are unaffected.
+Later bundles must pin the exact fork revision and explicit prerelease requirement;
+a `0.8.2` crates.io patch cannot select this incompatible version. Local versioned
+qualification passed the real fixture (54.20 seconds), 54 engine units and workspace
+Clippy. Final PR qualification remains pending.
+
+## PR qualification corrections
+
+PR 3 head `754e918d` passed the dedicated Linux x86, Linux ARM and macOS lifecycle
+jobs, but its workspace Unit Tests job failed at TCP cycle two. Its resource dump
+contained one `tokio-runtime-w` task with PF_EXITING and nonzero vsize, while file
+descriptors were already at baseline. Both reviews traced the exact locked Tokio
+1.47.1 shutdown: Runtime Drop reaches BlockingPool::shutdown(None), which joins
+its native worker handles, including the last timed-out worker. No missing join
+was found. Engine runtime threads are now named `malachite-rt` for attribution.
+
+Linux [exit_mm](https://github.com/torvalds/linux/blob/v6.11/kernel/exit.c#L509-L539)
+calls exit_mm_release before clearing current->mm.
+[mm_release](https://github.com/torvalds/linux/blob/v6.11/kernel/fork.c#L1510-L1544)
+clears the child TID and wakes the join futex within that earlier call. Therefore
+a joined thread can retain a nonzero vsize in procfs while irreversibly exiting.
+The observer now classifies initial PF_EXITING entries without requiring zero
+vsize. It still freezes all initial live observations, captures FD count before
+waiting, and waits at most one second only for those terminal paths to disappear.
+The mixed negative control now uses a nonzero-vsize terminal record and proves
+that an initially live worker cannot disappear into the terminal-entry wait.
+Production join semantics are unchanged. Review agreement: b3c021a9b7e9a9bf0c463c2532c4f4c0.
+
+Bootstrap post-merge Rust run 40505982903 failed the existing
+`crashes::concurrent_crash_recovery` test with a CRC mismatch. That test allows an
+uncooperative raw handle to truncate during a live writer's multi-write append,
+bypassing the advisory lock. The retained writer cursor can then leave a hole.
+This is external mutation, not an interrupted append whose writer has stopped.
+F3 replaces the timing lottery in a separate test-only commit: every byte offset
+of two raw tail-record sizes must preserve the complete prefix, truncate the torn
+tail, and permit append/reopen; a deterministic mid-append external truncation
+must remain InvalidData even after a subsequent valid append. Production WAL
+code is unchanged, including rejection of corrupt entries during engine replay.
+For the modeled incomplete tail records, FileLog::open truncates before iteration;
+these torn tails do not become corrupted-entry errors during engine replay. This
+does not claim automatic repair of arbitrary storage corruption.
+
+Run the WAL suite with nextest's per-test process isolation, as repository CI does.
+A plain concurrent libtest run can inherit other tests' advisory file locks in
+the existing process_termination test's fork-to-exec window, causing transient
+lock errors after the parent drops its handle. A standalone fork/flock control
+reproduced that inheritance and release on child exit. Nextest passed all six
+crash tests without retries. K5 must examine node process-spawn overlap with WAL
+startup; lock contention never authorizes a second writer or a competing engine.
+
+The bootstrap main failure is not treated as green. F3's full exact-head CI and
+post-merge main qualification replace that outstanding gate, per review agreement
+697dc0d355c0b39970ca7069b531bbfe. No retries, ignores, or new lint exceptions are
+used to hide these failures. Local follow-up qualification passed: 761 workspace
+tests, three existing skips, no retries, lifecycle fixture 54.25 seconds, watcher
+worst 23.876 microseconds, and full workspace Clippy. Both source reviews
+approved the combined correction (Interlink a6fb68d3fbc952b4fdb3095cd1a82c7b
+and 20ada81588f8fc1a137cf6f1e1b84e0d). Final PR/main qualification remains pending.
