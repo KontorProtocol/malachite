@@ -153,10 +153,22 @@ fn bound(runtime: &Runtime, channels: &Channels<TestContext>) {
 
 #[cfg(target_os = "linux")]
 fn resources() -> (usize, usize) {
-    (
-        fs::read_dir("/proc/self/task").unwrap().count(),
-        fs::read_dir("/proc/self/fd").unwrap().count(),
-    )
+    let tasks: Vec<_> = fs::read_dir("/proc/self/task")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let files = fs::read_dir("/proc/self/fd").unwrap().count();
+    eprintln!(
+        "resource snapshot: {} tasks, {files} descriptors",
+        tasks.len()
+    );
+    for task in &tasks {
+        // A joined task may disappear between enumeration and these reads.
+        let comm = fs::read_to_string(task.join("comm"));
+        let stat = fs::read_to_string(task.join("stat"));
+        eprintln!("{}: comm={comm:?} stat={stat:?}", task.display());
+    }
+    (tasks.len(), files)
 }
 
 #[cfg(target_os = "macos")]
@@ -628,6 +640,7 @@ fn real_engines_release_ports_workers_metrics_and_pending_replies() {
     let directory = Directory::new();
     let runtime = Builder::new_multi_thread()
         .worker_threads(2)
+        .thread_name("lifecycle-test")
         .enable_all()
         .build()
         .unwrap();
