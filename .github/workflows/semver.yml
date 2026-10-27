@@ -23,7 +23,7 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: step-security/paths-filter@6eee183b0d2fd101d3f8ee2935c127bca14c5625 # v3.0.5
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         with:
           filters: |
@@ -53,7 +53,7 @@ jobs:
           tool: cargo-semver-checks
       - name: Extract branch name
         shell: bash
-        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
+        run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> "$GITHUB_OUTPUT"
         id: extract_branch
       - name: Restore Rustdoc cache
         id: restore-cache-rustdoc
@@ -68,7 +68,7 @@ jobs:
         run: |
           # Capture current version
           current_version=$(grep -m 1 "version" code/Cargo.toml | cut -d'"' -f2)
-          echo "current_version=$current_version" >> $GITHUB_OUTPUT
+          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
 
           # Run the checks and capture output
           output_file="semver_check_output.txt"
@@ -85,20 +85,20 @@ jobs:
             --manifest-path code/Cargo.toml \
             > "$output_file" 2>&1; then
             echo "::success::Semver check passed"
-            echo "has_violations=false" >> $GITHUB_OUTPUT
+            echo "has_violations=false" >> "$GITHUB_OUTPUT"
           else
             echo "::error::Semver check failed"
-            echo "has_violations=true" >> $GITHUB_OUTPUT
+            echo "has_violations=true" >> "$GITHUB_OUTPUT"
             cat "$output_file"
           fi
 
           # Extract package name and required version bump from output
           if grep -q "semver requires new major version" "$output_file"; then
-            echo "version_bump=major" >> $GITHUB_OUTPUT
+            echo "version_bump=major" >> "$GITHUB_OUTPUT"
           elif grep -q "semver requires new minor version" "$output_file"; then
-            echo "version_bump=minor" >> $GITHUB_OUTPUT
+            echo "version_bump=minor" >> "$GITHUB_OUTPUT"
           else
-            echo "version_bump=unknown" >> $GITHUB_OUTPUT
+            echo "version_bump=unknown" >> "$GITHUB_OUTPUT"
           fi
         continue-on-error: true
       - name: Save Rustdoc cache

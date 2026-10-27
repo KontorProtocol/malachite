@@ -22,12 +22,12 @@ jobs:
 
             # Check if issue opener is in CODEOWNERS
             if echo "$CODEOWNERS" | grep -q "^${{ github.event.issue.user.login }}$"; then
-              echo "is_codeowner=true" >> $GITHUB_OUTPUT
+              echo "is_codeowner=true" >> "$GITHUB_OUTPUT"
             else
-              echo "is_codeowner=false" >> $GITHUB_OUTPUT
+              echo "is_codeowner=false" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "is_codeowner=false" >> $GITHUB_OUTPUT
+            echo "is_codeowner=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Add need-triage label

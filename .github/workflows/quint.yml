@@ -17,7 +17,7 @@ jobs:
       specs: ${{ steps.filter.outputs.specs }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: step-security/paths-filter@6eee183b0d2fd101d3f8ee2935c127bca14c5625 # v3.0.5
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         with:
           filters: |
@@ -51,4 +51,4 @@ jobs:
         with:
           node-version: "18"
       - run: npm install -g @informalsystems/quint
-      - run: find specs/ -name '*Test.qnt' | ./scripts/quint-forall.sh test --max-samples $MAX_SAMPLES
+      - run: find specs/ -name '*Test.qnt' | ./scripts/quint-forall.sh test --max-samples "$MAX_SAMPLES"

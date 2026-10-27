@@ -107,3 +107,27 @@ results are still pending. No merge has occurred.
 
 Do not reintroduce wrapper actions for compiler or lint steps unless their exit
 status propagates compiler/lint failures to the job.
+
+
+### First PR run and correction
+
+PR https://github.com/KontorProtocol/malachite/pull/2 opened at
+`832415c7aee0f373a1593f3d9759e919b6f9018a`. Its first change-detection jobs
+failed because step-security/paths-filter reported an invalid subscription.
+Dependent skipped test jobs are not passing test evidence. The replacement is
+the maintained original dorny/paths-filter at exact verified commit
+`0e4a8c6effa4802afeda77dc8d303f8176d7dfad` (v3 tag), preserving the same inputs
+and filtering behavior. The restored title policy uses the maintained original
+amannn/action-semantic-pull-request at verified v6.1.1 commit
+`48f256284bd46cdaab1048c3721360e808335d50`, avoiding the same subscription
+requirement. Its current interface uses Node24 and retains default Conventional
+Commits title validation with the GitHub token.
+
+The workflow validator also found twelve existing SC2086 shell quoting issues
+because CI includes ShellCheck while the first local actionlint run did not.
+All reported variable expansions are now quoted. Local actionlint passes with
+ShellCheck 0.11.0 explicitly enabled; the official Linux ARM archive matched
+SHA256 `12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588`.
+No checks were suppressed. First-run logs: Rust40497715192,
+Coverage40497715218, MBT40497715239, Quint40497715191,
+Semver40497715337, Workflow validation40497715467.
