@@ -1,0 +1,15 @@
+[
+  {
+    "name": "if-watch",
+    "version": "3.2.2",
+    "archive_sha256": "71c02a5161c313f0cbdbadc511611893584a10a7b6153cb554bdf83ddce99ec2",
+    "vendor_directory": "if-watch",
+    "patch": "if-watch.patch",
+    "vcs": {
+      "git": {
+        "sha1": "f6271229b3505bb1e245aad3d078bf571bb4e20e"
+      },
+      "path_in_vcs": ""
+    }
+  }
+]

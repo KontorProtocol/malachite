@@ -12,10 +12,11 @@ use tokio::sync::mpsc::{self, Sender};
 
 use malachitebft_app::types::codec::HasEncodedLen;
 use malachitebft_engine::network::{NetworkIdentity, NetworkRef};
+use malachitebft_engine::node::{Node, NodeMonitor};
 use malachitebft_engine::sync::SyncRef;
 use malachitebft_engine::util::events::TxEvent;
 use malachitebft_engine::util::output_port::{OutputPort, OutputPortSubscriberTrait};
-use malachitebft_engine::wal::WalRef;
+use malachitebft_engine::wal::{Wal, WalRef, WorkerRegistry};
 use malachitebft_signing::{Signer, Verifier};
 
 use crate::app::config::NodeConfig;
@@ -25,9 +26,10 @@ use crate::app::spawn::{
 };
 use crate::app::types::codec;
 use crate::app::types::core::Context;
+use crate::managed::ManagedActors;
 use crate::msgs::NetworkMsg;
 use crate::spawn::{spawn_host_actor, spawn_network_actor};
-use crate::{Channels, EngineHandle};
+use crate::{Channels, EngineHandle, ManagedEngine};
 
 pub enum NoCodec {}
 
@@ -736,6 +738,45 @@ where
     /// 2. Set up request handling tasks
     /// 3. Return channels for the application and the engine handle
     pub async fn build(self) -> Result<(Channels<Ctx>, EngineHandle)> {
+        let registry = SharedRegistry::global().with_moniker(self.config.moniker());
+        self.build_with_registry(registry).await
+    }
+
+    /// Build with a caller-owned metrics registry.
+    ///
+    /// In-process restarts need a fresh registry because the global registry cannot
+    /// unregister the previous engine's collectors. This method alone does not
+    /// establish ownership of the engine's runtime or background tasks.
+    pub async fn build_with_registry(
+        self,
+        registry: SharedRegistry,
+    ) -> Result<(Channels<Ctx>, EngineHandle)> {
+        self.build_with_workers(registry, None).await
+    }
+
+    /// Start an owned in-process runtime. Blocking waits on the returned owner
+    /// belong on a node control thread, not an asynchronous runtime worker.
+    pub fn start_managed(self) -> Result<ManagedEngine<Ctx>>
+    where
+        Config: Send + 'static,
+    {
+        if matches!(&self.wal, Some(WalBuilder::Custom(_)))
+            || matches!(&self.network, Some(NetworkBuilder::Custom(_)))
+            || matches!(&self.sync, Some(SyncBuilder::Custom(Some(_))))
+        {
+            eyre::bail!("managed engines cannot own externally constructed actors");
+        }
+        let registry = SharedRegistry::new(Default::default(), Some(self.config.moniker().into()));
+        ManagedEngine::spawn(registry, move |registry, workers, monitor, actors| {
+            self.build_with_workers(registry, Some((workers, monitor, actors)))
+        })
+    }
+
+    async fn build_with_workers(
+        self,
+        registry: SharedRegistry,
+        managed: Option<(WorkerRegistry, NodeMonitor, ManagedActors)>,
+    ) -> Result<(Channels<Ctx>, EngineHandle)> {
         // SAFETY: All these unwrap() calls are safe because the const generic
         // constraints guarantee that all configurations are present.
         let RequestBuilder::Default(request_ctx) = self.request.unwrap();
@@ -749,13 +790,23 @@ where
         let ctx = self.ctx;
         let config = self.config;
 
-        // Set up metrics
-        let registry = SharedRegistry::global().with_moniker(config.moniker());
         let metrics = Metrics::register(&registry);
 
         // 1. Node actor — spawned first so its NodeRef can be threaded into the
         //    WAL worker thread and Consensus actor. Children link to it once spawned.
-        let (node, node_join_handle) = spawn_node_actor(metrics.clone()).await?;
+        let (node, node_join_handle) = if let Some((_, monitor, _)) = &managed {
+            Node::new(metrics.clone(), tracing::Span::current())
+                .with_monitor(monitor.clone())
+                .spawn()
+                .await?
+        } else {
+            spawn_node_actor(metrics.clone()).await?
+        };
+
+        if let Some((_, _, actors)) = &managed {
+            actors.node(node.clone());
+        }
+        let is_managed = managed.is_some();
 
         // Spawn the children in an async block so a failed `?` can be caught and
         // the Node (plus children linked so far) stopped, rather than leaked.
@@ -776,20 +827,43 @@ where
                 }
             };
             network.link(node.get_cell());
+            if let Some((_, _, actors)) = &managed {
+                actors.child(network.get_cell());
+            }
 
             // 3. WAL actor (default or custom)
             let wal = match wal_builder {
                 WalBuilder::Custom(wal_ref) => wal_ref,
                 WalBuilder::Default(wal_ctx) => {
-                    spawn_wal_actor(&ctx, wal_ctx.codec, &wal_ctx.path, &registry, node.clone())
+                    if let Some((workers, _, _)) = &managed {
+                        if let Some(parent) = wal_ctx.path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        Wal::spawn_tracked(
+                            wal_ctx.codec,
+                            wal_ctx.path,
+                            tracing::Span::current(),
+                            node.clone(),
+                            workers.clone(),
+                        )
                         .await?
+                    } else {
+                        spawn_wal_actor(&ctx, wal_ctx.codec, &wal_ctx.path, &registry, node.clone())
+                            .await?
+                    }
                 }
             };
             wal.link(node.get_cell());
+            if let Some((_, _, actors)) = &managed {
+                actors.child(wal.get_cell());
+            }
 
             // 4. Host actor (use the default channel-based Connector)
             let (connector, rx_consensus) = spawn_host_actor(metrics.clone()).await?;
             connector.link(node.get_cell());
+            if let Some((_, _, actors)) = &managed {
+                actors.child(connector.get_cell());
+            }
 
             let tx_event = TxEvent::new();
             let sync_port = Arc::new(OutputPort::new());
@@ -811,6 +885,9 @@ where
             )
             .await?;
             consensus.link(node.get_cell());
+            if let Some((_, _, actors)) = &managed {
+                actors.child(consensus.get_cell());
+            }
 
             // 6. Sync actor (default or custom)
             let sync = match sync_builder {
@@ -830,6 +907,9 @@ where
             };
             if let Some(sync) = &sync {
                 sync.link(node.get_cell());
+                if let Some((_, _, actors)) = &managed {
+                    actors.child(sync.get_cell());
+                }
             }
 
             // Subscribe sync actor to the sync port
@@ -864,6 +944,7 @@ where
 
         match result {
             Ok(built) => Ok(built),
+            Err(e) if is_managed => Err(e),
             Err(e) => {
                 // Stop children, then the Node. Fire-and-forget — the caller is
                 // bailing with an error, no value in waiting.

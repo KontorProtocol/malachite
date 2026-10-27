@@ -1,5 +1,7 @@
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -11,6 +13,9 @@ use malachitebft_metrics::Metrics;
 /// otherwise carry a `Ctx` parameter (e.g. the WAL worker thread).
 #[derive(Debug)]
 pub enum NodeMsg {
+    /// Keep supervision active while children stop, and acknowledge all earlier
+    /// messages and higher-priority supervision events before returning.
+    PrepareShutdown(RpcReplyPort<()>),
     /// A safety-critical failure (e.g. WAL write failure, WAL worker panic).
     /// The Node stops all children and hangs — auto-restart would risk
     /// double-signing. The payload is a human-readable reason for logs.
@@ -25,9 +30,23 @@ pub enum NodeMsg {
 
 pub type NodeRef = ActorRef<NodeMsg>;
 
+#[derive(Clone, Default)]
+pub struct NodeMonitor(Arc<Mutex<Option<String>>>);
+
+impl NodeMonitor {
+    pub fn failure(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn record(&self, reason: String) {
+        self.0.lock().unwrap().get_or_insert(reason);
+    }
+}
+
 pub struct Node {
     metrics: Metrics,
     span: tracing::Span,
+    monitor: Option<NodeMonitor>,
 }
 
 pub struct NodeState {
@@ -42,7 +61,16 @@ pub struct NodeState {
 
 impl Node {
     pub fn new(metrics: Metrics, span: tracing::Span) -> Self {
-        Self { metrics, span }
+        Self {
+            metrics,
+            span,
+            monitor: None,
+        }
+    }
+
+    pub fn with_monitor(mut self, monitor: NodeMonitor) -> Self {
+        self.monitor = Some(monitor);
+        self
     }
 
     pub async fn spawn(self) -> Result<(NodeRef, JoinHandle<()>), ractor::SpawnErr> {
@@ -77,7 +105,15 @@ impl Actor for Node {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match msg {
+            NodeMsg::PrepareShutdown(reply) => {
+                state.shutting_down = true;
+                let _ = reply.send(());
+                Ok(())
+            }
             NodeMsg::SafetyFailure(reason) => {
+                if let Some(monitor) = &self.monitor {
+                    monitor.record(format!("safety failure: {reason}"));
+                }
                 if state.safety_hang {
                     // Already hanging; log the extra reason but don't re-stop children.
                     warn!(
@@ -122,6 +158,12 @@ impl Actor for Node {
             SupervisionEvent::ActorTerminated(cell, _state, reason) => {
                 let reason_str = reason.unwrap_or_default();
 
+                if !state.safety_hang && !state.shutting_down {
+                    if let Some(monitor) = &self.monitor {
+                        monitor.record(format!("child {} terminated: {reason_str}", cell.get_id()));
+                    }
+                }
+
                 if state.safety_hang {
                     // Children we asked to stop during safety-hang: log and stay.
                     info!(
@@ -157,6 +199,9 @@ impl Actor for Node {
             }
 
             SupervisionEvent::ActorFailed(cell, error) => {
+                if let Some(monitor) = &self.monitor {
+                    monitor.record(format!("child {} failed: {error}", cell.get_id()));
+                }
                 if state.safety_hang {
                     info!(
                         actor = %cell.get_id(), error = %error,
@@ -202,6 +247,32 @@ mod tests {
     use ractor::{Actor, ActorProcessingErr, ActorRef};
 
     use super::*;
+
+    #[tokio::test]
+    async fn managed_shutdown_keeps_the_first_safety_failure_observable() {
+        let registry = SharedRegistry::new(Default::default(), None);
+        let metrics = Metrics::register(&registry);
+        let monitor = NodeMonitor::default();
+        let (node, joined) = Node::new(metrics.clone(), tracing::Span::none())
+            .with_monitor(monitor.clone())
+            .spawn()
+            .await
+            .unwrap();
+        node.cast(NodeMsg::SafetyFailure("original failure".into()))
+            .unwrap();
+        ractor::call!(node, NodeMsg::PrepareShutdown).unwrap();
+        assert_eq!(metrics.node_safety_failure.get(), 1);
+        assert!(!joined.is_finished());
+        node.cast(NodeMsg::SafetyFailure("later failure".into()))
+            .unwrap();
+        ractor::call!(node, NodeMsg::PrepareShutdown).unwrap();
+        node.stop(None);
+        joined.await.unwrap();
+        assert_eq!(
+            monitor.failure().as_deref(),
+            Some("safety failure: original failure")
+        );
+    }
 
     /// Minimal child actor used to exercise the Node's supervisor policy.
     ///

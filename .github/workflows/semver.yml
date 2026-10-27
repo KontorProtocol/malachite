@@ -30,6 +30,7 @@ jobs:
             code:
               - 'code/**'
               - '.github/workflows/**'
+              - 'tools/ci/**'
 
   semver-checks:
     name: Detect semver violations
@@ -43,6 +44,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Fetch fork API baseline
+        if: github.repository == 'KontorProtocol/malachite'
+        id: baseline
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -m unittest discover -s tools/ci
+          git fetch --no-tags origin "$BASE_SHA"
+          baseline_rev=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          release_type=$(python3 tools/ci/semver_release_type.py "$baseline_rev")
+          echo "rev=$baseline_rev" >> "$GITHUB_OUTPUT"
+          echo "release_type=$release_type" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
           toolchain: 1.99.1
@@ -65,7 +82,17 @@ jobs:
             ${{ runner.os }}-semver-${{ steps.extract_branch.outputs.branch }}
       - name: Check semver
         id: semver-check
+        env:
+          BASELINE_REV: ${{ steps.baseline.outputs.rev }}
+          RELEASE_TYPE: ${{ steps.baseline.outputs.release_type }}
         run: |
+          # Fork releases are unpublished, so the registry cannot track their API.
+          baseline=()
+          if [[ "$GITHUB_REPOSITORY" == 'KontorProtocol/malachite' ]]; then
+            test -n "$BASELINE_REV"
+            test -n "$RELEASE_TYPE"
+            baseline=(--baseline-rev "$BASELINE_REV" --release-type "$RELEASE_TYPE")
+          fi
           # Capture current version
           current_version=$(grep -m 1 "version" code/Cargo.toml | cut -d'"' -f2)
           echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
@@ -73,6 +100,7 @@ jobs:
           # Run the checks and capture output
           output_file="semver_check_output.txt"
           if cargo semver-checks \
+            "${baseline[@]}" \
             --package arc-malachitebft-core-types \
             --package arc-malachitebft-core-consensus \
             --package arc-malachitebft-engine \
@@ -89,8 +117,8 @@ jobs:
           else
             echo "::error::Semver check failed"
             echo "has_violations=true" >> "$GITHUB_OUTPUT"
-            cat "$output_file"
           fi
+          cat "$output_file"
 
           # Extract package name and required version bump from output
           if grep -q "semver requires new major version" "$output_file"; then
@@ -216,7 +244,7 @@ jobs:
               console.log(`Updated comment ID ${botComment.id} to show issues are fixed`);
             }
       - name: Fail workflow if semver check failed
-        if: steps.semver-check.outputs.has_violations == 'true'
+        if: always() && (steps.semver-check.outcome != 'success' || steps.semver-check.outputs.has_violations != 'false')
         run: |
           echo "::error::Semver check failed. Please see PR comments for details on how to fix this issue."
           exit 1
