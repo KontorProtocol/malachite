@@ -138,10 +138,7 @@ jobs:
           components: clippy
           cache-workspaces: "code"
       - name: Run clippy
-        uses: actions-rs/clippy@9e02862195d5c88dabdda3c1e7fa53a45ed35ec1 # master
-        with:
-          token: ${{secrets.GITHUB_TOKEN}}
-          args: --locked --all-features --all-targets --manifest-path code/Cargo.toml -- -D warnings
+        run: cargo clippy --locked --workspace --all-features --all-targets --manifest-path code/Cargo.toml -- -D warnings
 
   fmt:
     name: Formatting

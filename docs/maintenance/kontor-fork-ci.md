@@ -78,3 +78,11 @@ https://docs.github.com/en/graphql/reference/commits#createcommitonbranch
 ## Execution ledger
 
 No policy workflow has been disabled. No prerequisite PR or merge exists yet.
+
+
+Independent review found the inherited actions-rs/clippy wrapper ignores Cargo's
+exit status. A negative control against the pinned bundled action used a stub
+Cargo emitting a valid lint error and exiting 101; the action printed the error
+but exited zero. The workflow now runs Cargo directly so compiler and lint
+failures fail the job. The full local Clippy command already passed with this
+scope. No test or compiler failure is converted to success by a wrapper.
