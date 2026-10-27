@@ -50,7 +50,7 @@ jobs:
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@cfdb446e391c69574ebc316dfb7d7849ec12b940 # v2.68.8
         with:
-          tool: cargo-semver-checks
+          tool: cargo-semver-checks@0.51.0
       - name: Extract branch name
         shell: bash
         run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> "$GITHUB_OUTPUT"

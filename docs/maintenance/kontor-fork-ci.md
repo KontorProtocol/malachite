@@ -131,3 +131,28 @@ SHA256 `12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588`.
 No checks were suppressed. First-run logs: Rust40497715192,
 Coverage40497715218, MBT40497715239, Quint40497715191,
 Semver40497715337, Workflow validation40497715467.
+
+### Pinned analysis tools
+
+Quint run 40498724761 failed unchanged specifications with an unpinned evaluator.
+Both installation and script invocation now use 0.27.0, matching the existing
+MBT job. The local full suite passed all 89 test cases across 16 specification
+files with max-samples 100. No specification or test was changed. The script
+preserves argument boundaries, isolates the subprocess stdin from the file list,
+prints the number of executed files and rejects an empty list. The final runner
+also passed all 16 files and 89 cases; its printed count matched file discovery.
+Independent negative controls verified stdin isolation, argument boundaries,
+complete iteration, zero-file rejection and failure propagation. Exact-head CI
+remains required.
+
+Semver run 40498724686 installed cargo-semver-checks 0.46.0 through the pinned
+installer's default version and rejected Rust 1.99.1 rustdoc format v61. It now
+explicitly installs 0.51.0, whose release supports Rust 1.99. The compiler remains
+1.99.1. The official Linux ARM64 binary matched SHA256
+`58531fa492d237c71b97d113a6d2a36209d96105956569cd0406aa66226ac928`.
+Local analysis completed all nine existing crate selections: each reported 202
+passing checks, 58 inapplicable checks, and no semver update required. This includes
+both baseline and candidate rustdoc generation/parsing under Rust 1.99.1. The
+existing failure gate remains enabled. All 47 Quint files also typecheck under
+0.27.0. Exact-head CI remains required.
+Release: https://github.com/obi1kenobi/cargo-semver-checks/releases/tag/v0.51.0
