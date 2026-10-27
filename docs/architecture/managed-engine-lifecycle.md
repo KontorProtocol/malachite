@@ -330,6 +330,51 @@ repeated cycles. Documentation clarification agreed in Interlink receipt
 Source: futures-timer 3.0.3 native/global.rs, native/timer.rs and native/delay.rs
 from the checksum-locked registry package in code/Cargo.lock.
 
+### Tokio Unix signal registry
+
+The locked Tokio 1.47.1 graph has one additional process-lifetime resource on
+Unix: a pair of UnixStream file descriptors in its signal registry's OnceLock.
+With the current features, enabling runtime I/O constructs the signal driver,
+which initializes this pair even without an application signal subscription.
+Each runtime owns a duplicate receiver that closes when the runtime is dropped;
+the original pair remains until process exit. The exception is two descriptors
+per independently linked Tokio graph, not two per engine. Graphs remain resident
+for the node's lifetime. It does not permit retaining engine sockets, WAL handles,
+runtime workers, callbacks or signing/storage authority after join.
+
+Source trace in the checksum-locked Tokio package:
+
+- `src/runtime/driver.rs`: I/O creation calls `create_signal_driver`.
+- `src/runtime/signal/mod.rs`: `Driver::new` duplicates `globals().receiver`.
+- `src/signal/registry.rs`: `globals` retains `Globals` in a OnceLock.
+- `src/signal/unix.rs`: `OsExtraData::init` constructs the UnixStream pair.
+
+Creating that registry does not itself subscribe to SIGTERM, SIGINT or SIGCHLD.
+The process orphan queue registers SIGCHLD only when it has orphaned children;
+explicit child spawning can also register it. Kontor's bundle policy must reject
+control-signal subscriptions and child spawning in bundle-owned Kontor/fork
+code. The node owns those operations. Wasmtime's separately reviewed trap
+handlers retain their F1 exception. A blanket ban on signal symbols in input
+archives would be incorrect: Tokio includes the implementation with the current
+features, even when the bundle does not call its subscription APIs. Changes in
+third-party behavior require renewed resource and signal qualification.
+
+K1 must measure cold-start allocation per graph, then require zero unexplained
+descriptor growth over repeated engine replacements. Its combined executable
+must deliver SIGTERM and SIGINT to node-owned handlers with both engines live
+and again after replacement; engines continue until the host requests stop.
+A node-owned child must also be reaped with its expected exit status while both
+bundles are live. These behavior guards complement the source-callsite policy.
+They are K1 acceptance gates, not evidence already supplied by F3.
+
+The F3 fixture's outer test runtime initializes this same Tokio graph before its
+stable baseline, so its repeated-cycle checks do not establish cold allocation.
+A separate Linux probe constructed and dropped 40 Tokio 1.47.1 runtimes: four
+initial descriptors became six after the first drop and remained six after all
+40. This supports the bounded-pair explanation, but is not combined-bundle or
+signal-delivery qualification. Review agreements: 5e476ff359000469af853d342588b208
+and 3aac0eadc7a134f7a5501daf623fdbd3. No production behavior changes here.
+
 
 ## Rebased source and complete pre-PR platform results
 
@@ -450,3 +495,40 @@ tests, three existing skips, no retries, lifecycle fixture 54.25 seconds, watche
 worst 23.876 microseconds, and full workspace Clippy. Both source reviews
 approved the combined correction (Interlink a6fb68d3fbc952b4fdb3095cd1a82c7b
 and 20ada81588f8fc1a137cf6f1e1b84e0d). Final PR/main qualification remains pending.
+
+## F3 merge qualification
+
+[PR 3](https://github.com/KontorProtocol/malachite/pull/3) merged as
+`be93c1bc4668bb83e7fef023376079fd664ed6c6`. Its tree
+`c349bd43a2450b46ab4da76a04efa259c9a96809` exactly matches reviewed head
+`6a3917201875f49d28016cbfa18ee6b8393cbf46`. The earlier pending statements above
+record their respective checkpoints; the following results supersede the PR
+qualification status without changing the failed-run history.
+
+All applicable checks passed on that final PR head, including the restored
+collaborator, title and signature policies. Rust run 40510810713 passed 761 unit
+tests (three existing skips), 22 discovery tests (one existing ignored test),
+215 test-app tests (five existing ignored tests), Clippy, formatting, MSRV,
+standalone and no_std checks. Coverage run 40510810318 passed 998 tests with nine
+existing skips and no second attempts. Its report artifact is 12738777076.
+The upstream-only Codecov publication was intentionally skipped on the fork.
+
+Lifecycle run 40510810370 passed all 54 engine units and the complete fixture on
+each platform:
+
+| Platform | Lifecycle duration | Worst quiet watcher drop |
+| --- | --- | --- |
+| Linux x86 | 54.15s | 26.169 microseconds |
+| Linux ARM | 54.12s | 30.817 microseconds |
+| macOS | 56.91s | 423.666 microseconds |
+
+ARM observed a real terminal task, two re-polls in 27.088 microseconds. Its
+injected mixed control took one re-poll in 34.193 microseconds; x86's injected
+control took one re-poll in 53.561 microseconds. Semver run 40510810622 passed the
+explicit major-release policy for all nine checked packages (zero checks, 260
+skips each, as explained above). MBT, Quint and CodeQL also passed.
+
+Post-merge main qualification is still running at this documentation checkpoint:
+Rust 40515844978, lifecycle 40515845031 and coverage 40515845071. F3 and the earlier
+bootstrap main gate close only after the applicable post-merge jobs pass. K1's
+combined-graph ownership and host-signal acceptance gates remain separate.
