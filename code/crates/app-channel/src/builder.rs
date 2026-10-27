@@ -812,6 +812,9 @@ where
         // the Node (plus children linked so far) stopped, rather than leaked.
         let node_for_cleanup = node.clone();
         let result: Result<(Channels<Ctx>, EngineHandle)> = async move {
+            // Managed shutdown reverses this registration order: network, WAL,
+            // connector, consensus, sync. Providers must precede dependents so
+            // in-flight consensus RPCs can finish before their providers stop.
             // 2. Network actor (default or custom)
             let (network, tx_network) = match network_builder {
                 NetworkBuilder::Custom(custom) => custom,

@@ -46,10 +46,21 @@ which permit unfinished work to survive the return.
   immediately, but waits for startup to return before draining actors. A wedged
   startup retains the owner and makes wait_stopped time out.
 - Before stopping children, acknowledge PrepareShutdown on their supervisor.
-  Stop children, allow one second of grace, kill remaining actors, and wait for
-  terminal status. A second ordinary supervisor RPC drains terminal supervision
+  Stop children in reverse construction-dependency order: sync, consensus,
+  connector, WAL, network. Give each child one second of grace, kill it if
+  necessary, and await terminal status before stopping its providers. This keeps
+  a final in-flight consensus WAL RPC from encountering an already closed WAL.
+  A second ordinary supervisor RPC drains terminal supervision
   events before stopping the supervisor. Record the first safety or child failure
   even during teardown, then report it after runtime and WAL destruction.
+  A stuck post_stop cannot be interrupted by ractor's kill signal: the mandatory
+  terminal wait still retains ownership. Detached reply-forwarding tasks finish
+  at runtime destruction, not merely when their actor reaches Stopped.
+  Grace intervals are sequential, up to five one-second intervals for all five
+  actors. This is not a total shutdown bound: stalled post_stop, blocking tasks
+  or WAL workers may retain ownership indefinitely. Kontor's K5 coordinator and
+  K7 activation diagnostics must budget for the sum, preserve timeout ownership,
+  and guard the builder's provider-before-dependent registration order explicitly.
 - Do not use repeated ractor ActorCell::wait calls across the grace timeout:
   ractor 0.15.10 retains only one notification permit for late waiters. Poll
   terminal status instead. Runtime destruction and the outer thread join remain
@@ -132,7 +143,7 @@ WAL workers and per-engine metrics. On Linux it currently passes:
   and preserves a stable set of metric families.
 - Partial startup failure after network creation, using an invalid WAL path.
 - Real WAL replay blocked inside its codec. Repeated shutdown waits, including a
-  two-second wait beyond the one-second actor grace period, retain the join owner.
+  wait beyond an individual actor's grace period, retain the join owner.
   The engine network channels close, the outer runtime heartbeat continues, and
   releasing the worker permits a complete join.
 - A real WAL codec panic and a real consensus actor panic, including a panic

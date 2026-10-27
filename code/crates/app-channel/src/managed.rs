@@ -67,20 +67,18 @@ impl ManagedActors {
                     .map_err(|error| ManagedEngineError::UnexpectedExit(error.to_string()));
             }
         }
-        for child in &children {
+        // Registration follows construction dependencies. A dependent may still
+        // finish an in-flight RPC after receiving stop, so its providers must
+        // remain available until it reaches Stopped, including after a kill.
+        for child in children.iter().rev() {
             child.stop(Some("managed engine shutdown".into()));
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            for child in &children {
+            if tokio::time::timeout(Duration::from_secs(1), wait_for_actor(child))
+                .await
+                .is_err()
+            {
+                child.kill();
                 wait_for_actor(child).await;
             }
-        })
-        .await;
-        for child in &children {
-            child.kill();
-        }
-        for child in &children {
-            wait_for_actor(child).await;
         }
         if let Some(node) = node {
             if node.get_status() != ActorStatus::Stopped {
@@ -323,5 +321,94 @@ async fn wait_for_actor(actor: &ActorCell) {
     // A grace-period wait can consume it, so a second wait can sleep forever.
     while actor.get_status() != ActorStatus::Stopped {
         tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ractor::{async_trait, call, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+
+    use super::ManagedActors;
+
+    struct Provider;
+
+    #[async_trait]
+    impl Actor for Provider {
+        type Msg = RpcReplyPort<()>;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            reply: Self::Msg,
+            _state: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            let _ = reply.send(());
+            Ok(())
+        }
+    }
+
+    struct Dependent(ActorRef<RpcReplyPort<()>>);
+
+    #[async_trait]
+    impl Actor for Dependent {
+        type Msg = ();
+        type State = Option<oneshot::Sender<bool>>;
+        type Arguments = oneshot::Sender<bool>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            result: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(Some(result))
+        }
+
+        async fn post_stop(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            result: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            // A provider must outlive its dependent's last RPC. Stop has higher
+            // priority than RPC messages, so stopping both first loses this call.
+            let available = call!(self.0, |reply| reply).is_ok();
+            result.take().unwrap().send(available).unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_providers_alive_until_dependents_finish() {
+        let actors = ManagedActors::default();
+        let (provider, provider_join) = Actor::spawn(None, Provider, ()).await.unwrap();
+        actors.child(provider.get_cell());
+        let (result, observed) = oneshot::channel();
+        let (dependent, dependent_join) = Actor::spawn(None, Dependent(provider), result)
+            .await
+            .unwrap();
+        actors.child(dependent.get_cell());
+        timeout(Duration::from_secs(5), actors.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            observed.await.unwrap(),
+            "shutdown closed a live RPC provider"
+        );
+        provider_join.await.unwrap();
+        dependent_join.await.unwrap();
     }
 }

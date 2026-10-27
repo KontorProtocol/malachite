@@ -48,6 +48,6 @@ jobs:
           rustc -vV
           uname -a
       - name: Exercise real managed engines and quiet interface watchers
-        run: cargo test --locked -j2 -p arc-malachitebft-app-channel --test managed_lifecycle -- --nocapture
+        run: cargo test --locked -j2 -p arc-malachitebft-app-channel --test managed_lifecycle --test managed_network_teardown -- --nocapture
       - name: Verify supervision and WAL failure behavior
-        run: cargo test --locked -j2 -p arc-malachitebft-engine --lib
+        run: cargo test --locked -j2 -p arc-malachitebft-engine -p arc-malachitebft-app-channel --lib
