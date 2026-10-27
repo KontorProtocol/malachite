@@ -27,6 +27,11 @@ which permit unfinished work to survive the return.
   failures rather than reporting clean shutdown.
 - Drop the runtime on its dedicated thread, outside any entered async context.
   Runtime destruction owns nested Tokio tasks, including libp2p/quinn tasks.
+  Nested actors must own only runtime resources: any non-runtime resource or
+  durable writer needing final flush must register an explicit lifecycle owner,
+  as the WAL does. Thread/descriptor baselines guard this audited ownership rule.
+  Dropping ManagedEngine in a Tokio runtime context logs an error before joining;
+  the guard does not panic or abandon ownership.
 - Preserve a single join owner across timeout and cancellation. A panic or
   unexpected actor exit is an engine fault, never permission for silent restart.
 - Partial startup failure and canceled readiness use the same teardown path.
@@ -195,3 +200,36 @@ https://kontor-protocol-study-20261026.wilfred714608.chatgpt.site#implementation
 Deployment `appgdep_6ae06c97d8208191b5a33441d7341274` succeeded. Static
 structure, anchors, dark theme and downloads passed; this text-only update did
 not receive new browser visual verification.
+
+
+## Review dispositions
+
+Independent source review and WAL-correction follow-up approved head
+`974a0b71cd3fd3f7686201fb0a741bdc39d457db`. Interlink source approval:
+`6f7ad68e65a46c1279e5fce8ec9026a8`, also recorded under the dedicated source
+review task in receipt `555b86af987e621c765928791759e2b9`.
+
+- F3-1: checksum-and-patch vendor verification must run in F3 CI whenever vendor
+  or verifier files change. Still a pre-PR gate.
+- F3-2: retained ordinary operation errors must not add an extra SafetyFailure
+  notification on unmanaged worker exit after a successful final flush. Only a
+  terminal panic or final-flush failure produces that extra notification. Every
+  operation failure still survives in the join outcome. A closed-reply worker
+  test checks both notification behavior and combined final-flush failure.
+- F3-3: document the nested-runtime-resource ownership rule above.
+- F3-4: log runtime-context Drop misuse, preserve the blocking join.
+- F3-5: real Linux x86/ARM and macOS lifecycle CI remains required.
+
+Interlink accepted these dispositions in `e8910aced07336bf8d92f8fc7b1ea06c`.
+The behavior and CI changes need exact-head follow-up reviews.
+
+
+The F3 CI workflow is prepared for real lifecycle and engine-unit tests on
+ubuntu-24.04, ubuntu-24.04-arm and macos-latest with Rust 1.99.1. It verifies
+vendor provenance on every platform, and its path triggers include code/vendor
+and tools/lifecycle-vendor changes. Feature-branch pushes allow qualification
+before opening the reviewed PR. Platform results are not yet available.
+The F3-2 notification regression and all 54 engine tests pass locally; affected
+all-target/all-feature Clippy also passes after the Drop diagnostic.
+Fork CI prerequisite PR: https://github.com/KontorProtocol/malachite/pull/2.
+F3 must rebase on its verified merge before PR completion.

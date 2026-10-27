@@ -82,6 +82,12 @@ where
                 format_panic_reason(error.as_ref())
             ))
         });
+        // Operation errors already travel to consensus and remain in the join
+        // outcome. Only a terminal worker fault needs an additional notification,
+        // preserving the unmanaged path's behavior after an earlier operation error.
+        if let Err(reason) = &result {
+            let _ = node.cast(NodeMsg::SafetyFailure(reason.clone()));
+        }
         let result = match (first_failure, result) {
             (None, result) => result,
             (Some(reason), Ok(())) => Err(reason),
@@ -89,7 +95,6 @@ where
         };
         if let Err(reason) = &result {
             error!(%reason, "WAL worker failed");
-            let _ = node.cast(NodeMsg::SafetyFailure(reason.clone()));
         }
         result
     })
@@ -368,7 +373,7 @@ mod lifecycle_tests {
     use tokio::sync::{mpsc, oneshot};
     use tracing::Span;
 
-    use crate::node::Node;
+    use crate::node::{Node, NodeMonitor, NodeMsg};
     use crate::wal::WorkerRegistry;
 
     use super::{spawn_with_final_flush, WalMsg};
@@ -388,47 +393,67 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn append_and_final_flush_failures_survive_a_closed_reply() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("failed-append.wal");
-        let registry = SharedRegistry::new(Default::default(), None);
-        let metrics = Metrics::register(&registry);
-        let (node, node_join) = Node::new(metrics, Span::none()).spawn().await.unwrap();
-        let (commands, receiver) = mpsc::channel::<WalMsg<TestContext>>(2);
-        let worker = spawn_with_final_flush(
-            Span::none(),
-            Log::open(&path).unwrap(),
-            FailingCodec,
-            receiver,
-            node.clone(),
-            |_log| Err(io::Error::other("injected final fsync failure")),
-        );
-        let validator = Validator::new(PrivateKey::from([9; 32]).public_key(), 1);
-        let value = ProposedValue {
-            height: Height::new(1),
-            round: Round::new(0),
-            valid_round: Round::Nil,
-            proposer: validator.address,
-            value: Value::new(42),
-            validity: Validity::Valid,
-        };
-        let (reply, receiver) = oneshot::channel();
-        drop(receiver);
-        commands
-            .send(WalMsg::Append(
-                Input::ProposedValue(value, ValueOrigin::Consensus),
-                reply,
-            ))
-            .await
-            .unwrap();
-        commands.send(WalMsg::Shutdown).await.unwrap();
-        drop(commands);
-        let error = worker.join().unwrap().unwrap_err();
-        assert!(error.contains("injected append encoding failure"));
-        assert!(error.contains("injected final fsync failure"));
-        drop(Log::open(&path).expect("joined worker must release the WAL lock"));
-        node.stop(None);
-        node_join.await.unwrap();
+    async fn operation_and_terminal_failures_have_distinct_notifications() {
+        for final_failure in [false, true] {
+            let directory = tempdir().unwrap();
+            let path = directory
+                .path()
+                .join(format!("failed-append-{final_failure}.wal"));
+            let registry = SharedRegistry::new(Default::default(), None);
+            let metrics = Metrics::register(&registry);
+            let monitor = NodeMonitor::default();
+            let (node, node_join) = Node::new(metrics, Span::none())
+                .with_monitor(monitor.clone())
+                .spawn()
+                .await
+                .unwrap();
+            let (commands, receiver) = mpsc::channel::<WalMsg<TestContext>>(2);
+            let worker = spawn_with_final_flush(
+                Span::none(),
+                Log::open(&path).unwrap(),
+                FailingCodec,
+                receiver,
+                node.clone(),
+                move |log| {
+                    if final_failure {
+                        Err(io::Error::other("injected final fsync failure"))
+                    } else {
+                        log.flush()
+                    }
+                },
+            );
+            let validator = Validator::new(PrivateKey::from([9; 32]).public_key(), 1);
+            let value = ProposedValue {
+                height: Height::new(1),
+                round: Round::new(0),
+                valid_round: Round::Nil,
+                proposer: validator.address,
+                value: Value::new(42),
+                validity: Validity::Valid,
+            };
+            let (reply, receiver) = oneshot::channel();
+            drop(receiver);
+            commands
+                .send(WalMsg::Append(
+                    Input::ProposedValue(value, ValueOrigin::Consensus),
+                    reply,
+                ))
+                .await
+                .unwrap();
+            commands.send(WalMsg::Shutdown).await.unwrap();
+            drop(commands);
+            let error = worker.join().unwrap().unwrap_err();
+            assert!(error.contains("injected append encoding failure"));
+            assert_eq!(
+                error.contains("injected final fsync failure"),
+                final_failure
+            );
+            ractor::call!(node, NodeMsg::PrepareShutdown).unwrap();
+            assert_eq!(monitor.failure().is_some(), final_failure);
+            drop(Log::open(&path).expect("joined worker must release the WAL lock"));
+            node.stop(None);
+            node_join.await.unwrap();
+        }
     }
 
     #[tokio::test]

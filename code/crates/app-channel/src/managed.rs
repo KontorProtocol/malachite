@@ -9,7 +9,7 @@ use malachitebft_engine::node::{NodeMonitor, NodeMsg, NodeRef};
 use malachitebft_engine::wal::WorkerRegistry;
 use ractor::{ActorCell, ActorStatus};
 use thiserror::Error;
-use tokio::runtime::Builder;
+use tokio::runtime::{Builder, Handle};
 use tokio::sync::oneshot;
 
 use crate::app::metrics::SharedRegistry;
@@ -251,6 +251,11 @@ impl<Ctx: Context> Drop for ManagedEngine<Ctx> {
     fn drop(&mut self) {
         self.request_stop();
         if let Some(thread) = self.thread.take() {
+            if Handle::try_current().is_ok() {
+                tracing::error!(
+                    "ManagedEngine dropped inside a Tokio runtime context; join blocks this thread"
+                );
+            }
             if thread.join().is_err() {
                 tracing::error!("Managed engine thread panicked during drop");
             }
