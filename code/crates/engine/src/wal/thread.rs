@@ -55,12 +55,16 @@ where
     Flush: FnOnce(&mut wal::Log) -> io::Result<()> + Send + 'static,
 {
     thread::spawn(move || {
+        let mut first_failure = None;
         let result = catch_unwind(AssertUnwindSafe(|| {
             while let Some(msg) = rx.blocking_recv() {
                 match process_msg(msg, &span, &mut log, &codec) {
                     Ok(ControlFlow::Continue(())) => continue,
                     Ok(ControlFlow::Break(())) => break,
-                    Err(e) => error!("WAL task failed: {e}"),
+                    Err(e) => {
+                        error!("WAL task failed: {e}");
+                        first_failure.get_or_insert_with(|| e.to_string());
+                    }
                 }
             }
 
@@ -78,6 +82,11 @@ where
                 format_panic_reason(error.as_ref())
             ))
         });
+        let result = match (first_failure, result) {
+            (None, result) => result,
+            (Some(reason), Ok(())) => Err(reason),
+            (Some(reason), Err(final_error)) => Err(format!("{reason}; {final_error}")),
+        };
         if let Err(reason) = &result {
             error!(%reason, "WAL worker failed");
             let _ = node.cast(NodeMsg::SafetyFailure(reason.clone()));
@@ -121,8 +130,17 @@ where
                 // Let's check if there are any entries to replay
                 let entries = fetch_entries(log, codec);
 
-                if reply.send(entries).is_err() {
-                    error!("Failed to send WAL replay reply");
+                let replay_failure = entries.as_ref().ok().and_then(|entries| {
+                    entries.iter().find_map(|entry| {
+                        entry
+                            .as_ref()
+                            .err()
+                            .map(|error| eyre!("WAL replay: {error}"))
+                    })
+                });
+                send_reply(reply, entries, "WAL replay")?;
+                if let Some(error) = replay_failure {
+                    return Err(error);
                 }
             } else {
                 // WAL is at different sequence, restart it
@@ -131,9 +149,7 @@ where
 
                 debug!(%height, "Reset WAL");
 
-                if reply.send(result).is_err() {
-                    error!("Failed to send WAL reset reply");
-                }
+                send_reply(reply, result, "WAL reset")?;
             }
         }
 
@@ -144,9 +160,7 @@ where
 
             debug!(%height, "Reset WAL");
 
-            if reply.send(result).is_err() {
-                error!("Failed to send WAL reset reply");
-            }
+            send_reply(reply, result, "WAL reset")?;
         }
 
         WalMsg::Append(entry, reply) => {
@@ -174,9 +188,7 @@ where
                 );
             }
 
-            if reply.send(result).is_err() {
-                error!("Failed to send WAL append reply");
-            }
+            send_reply(reply, result, "WAL append")?;
         }
 
         WalMsg::Flush(reply) => {
@@ -192,9 +204,7 @@ where
                 );
             }
 
-            if reply.send(result).is_err() {
-                error!("Failed to send WAL flush reply");
-            }
+            send_reply(reply, result, "WAL flush")?;
         }
 
         WalMsg::Dump => {
@@ -210,6 +220,20 @@ where
     }
 
     Ok(ControlFlow::Continue(()))
+}
+
+fn send_reply<T>(reply: ReplyTo<T>, result: Result<T>, operation: &str) -> Result<()> {
+    // The waiting actor may have been killed during shutdown. Keep operation
+    // failures independently of reply delivery so a later successful fsync
+    // cannot turn failed persistence or replay into a clean worker join.
+    let failure = result
+        .as_ref()
+        .err()
+        .map(|error| eyre!("{operation}: {error}"));
+    if reply.send(result).is_err() {
+        error!(%operation, "Failed to send WAL reply");
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 fn fetch_entries<Ctx, Codec>(
@@ -332,18 +356,80 @@ fn wal_entry_type<Ctx: Context>(entry: &Input<Ctx>) -> &'static str {
 mod lifecycle_tests {
     use std::io;
 
+    use bytes::Bytes;
+    use malachitebft_codec::Codec;
+    use malachitebft_core_consensus::{Input, ProposedValue};
+    use malachitebft_core_types::{Round, Validity, ValueOrigin};
     use malachitebft_metrics::{Metrics, SharedRegistry};
     use malachitebft_test::codec::proto::ProtobufCodec;
-    use malachitebft_test::TestContext;
+    use malachitebft_test::{Height, PrivateKey, TestContext, Validator, Value};
     use malachitebft_wal::Log;
     use tempfile::tempdir;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
     use tracing::Span;
 
     use crate::node::Node;
     use crate::wal::WorkerRegistry;
 
     use super::{spawn_with_final_flush, WalMsg};
+
+    struct FailingCodec;
+
+    impl<T> Codec<T> for FailingCodec {
+        type Error = io::Error;
+
+        fn decode(&self, _: Bytes) -> io::Result<T> {
+            Err(io::Error::other("injected decode failure"))
+        }
+
+        fn encode(&self, _: &T) -> io::Result<Bytes> {
+            Err(io::Error::other("injected append encoding failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn append_and_final_flush_failures_survive_a_closed_reply() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("failed-append.wal");
+        let registry = SharedRegistry::new(Default::default(), None);
+        let metrics = Metrics::register(&registry);
+        let (node, node_join) = Node::new(metrics, Span::none()).spawn().await.unwrap();
+        let (commands, receiver) = mpsc::channel::<WalMsg<TestContext>>(2);
+        let worker = spawn_with_final_flush(
+            Span::none(),
+            Log::open(&path).unwrap(),
+            FailingCodec,
+            receiver,
+            node.clone(),
+            |_log| Err(io::Error::other("injected final fsync failure")),
+        );
+        let validator = Validator::new(PrivateKey::from([9; 32]).public_key(), 1);
+        let value = ProposedValue {
+            height: Height::new(1),
+            round: Round::new(0),
+            valid_round: Round::Nil,
+            proposer: validator.address,
+            value: Value::new(42),
+            validity: Validity::Valid,
+        };
+        let (reply, receiver) = oneshot::channel();
+        drop(receiver);
+        commands
+            .send(WalMsg::Append(
+                Input::ProposedValue(value, ValueOrigin::Consensus),
+                reply,
+            ))
+            .await
+            .unwrap();
+        commands.send(WalMsg::Shutdown).await.unwrap();
+        drop(commands);
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.contains("injected append encoding failure"));
+        assert!(error.contains("injected final fsync failure"));
+        drop(Log::open(&path).expect("joined worker must release the WAL lock"));
+        node.stop(None);
+        node_join.await.unwrap();
+    }
 
     #[tokio::test]
     async fn final_flush_failure_is_joined_and_releases_the_file_lock() {

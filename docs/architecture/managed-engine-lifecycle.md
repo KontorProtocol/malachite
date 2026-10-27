@@ -147,12 +147,24 @@ WAL workers and per-engine metrics. On Linux it currently passes:
 - Panic during partial startup after actor creation. The panic remains observable
   after actor cleanup, runtime destruction and WAL joins, with resources at baseline.
 
-The latest complete lifecycle run passed in 52.14s, with worst Linux watcher drop
-latency 7.292 microseconds. All 53 engine unit tests pass, including the new first
+The latest complete lifecycle run passed in 54.34s, with worst Linux watcher drop
+latency 10.542 microseconds. All 54 engine unit tests pass, including the new first
 safety-fault preservation and final WAL flush-failure cases. These are local
 observations, not cross-platform guarantees.
+The all-feature workspace unit selection passed 759 tests (three existing skips)
+at `b92e3909a3289ad10051eef0e00adf488ddcd729`, before the WAL correction below.
+
+Independent review identified an error-loss race: a nonpanic WAL operation error
+could arrive after shutdown killed the waiting actor, then a successful final
+flush could hide the failure. The worker now retains its first operation error,
+including replay's nested entry failures, independently of reply delivery. It
+still attempts final flush and preserves both errors when that also fails.
+The real-engine regression delays a replay error until after the actor grace
+period and confirms the join returns a fault with resources at baseline. A real
+worker test also verifies append encoding failure plus final-fsync failure with
+an already-closed reply receiver. Best-effort diagnostic Dump remains unchanged.
 The vendor reconstruction and formatting checks pass under Rust 1.99.1.
-Affected-crate all-target, all-feature Clippy passes on the current changes. Existing async-trait and
+Full-workspace all-target, all-feature Clippy passes on the WAL correction. Existing async-trait and
 async-recursion macros required narrowly scoped redundant-must-use lint
 annotations for that compiler; their generated behavior is unchanged.
 

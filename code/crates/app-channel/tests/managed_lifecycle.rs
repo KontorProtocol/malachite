@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io;
 use std::net::{TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -255,28 +256,38 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-struct GatedCodec(Arc<Gate>);
+struct GatedCodec {
+    gate: Arc<Gate>,
+    fail: bool,
+}
 
 impl<T> Codec<T> for GatedCodec
 where
     ProtobufCodec: Codec<T>,
 {
-    type Error = <ProtobufCodec as Codec<T>>::Error;
+    type Error = io::Error;
 
     fn decode(&self, bytes: Bytes) -> Result<T, Self::Error> {
-        self.0.enter();
-        ProtobufCodec.decode(bytes)
+        self.gate.enter();
+        if self.fail {
+            return Err(io::Error::other("injected delayed replay failure"));
+        }
+        ProtobufCodec
+            .decode(bytes)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     fn encode(&self, value: &T) -> Result<Bytes, Self::Error> {
-        ProtobufCodec.encode(value)
+        ProtobufCodec
+            .encode(value)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 }
 
 fn wal_failure_cases(runtime: &Runtime, directory: &Path, heartbeat: &AtomicU64) {
-    for panic in [false, true] {
+    for (panic, fail) in [(false, false), (true, false), (false, true)] {
         let baseline = resources();
-        let path = directory.join(format!("gated-{panic}.wal"));
+        let path = directory.join(format!("gated-{panic}-{fail}.wal"));
         let validator = Validator::new(PrivateKey::from([9; 32]).public_key(), 1);
         let value = ProposedValue::<TestContext> {
             height: Height::new(1),
@@ -306,7 +317,14 @@ fn wal_failure_cases(runtime: &Runtime, directory: &Path, heartbeat: &AtomicU64)
             wake: Condvar::new(),
             panic,
         });
-        let mut engine = start_with_codec("/ip4/0.0.0.0/tcp/0", &path, GatedCodec(gate.clone()));
+        let mut engine = start_with_codec(
+            "/ip4/0.0.0.0/tcp/0",
+            &path,
+            GatedCodec {
+                gate: gate.clone(),
+                fail,
+            },
+        );
         // Release before the owner's blocking Drop if any assertion unwinds.
         let release = ReleaseOnDrop(gate);
         let mut channels = engine.wait_ready(Duration::from_secs(10)).unwrap().unwrap();
@@ -343,7 +361,14 @@ fn wal_failure_cases(runtime: &Runtime, directory: &Path, heartbeat: &AtomicU64)
             assert!(channels.net_requests.is_closed());
             assert!(heartbeat.load(Ordering::Relaxed) > before);
             release.0.release();
-            assert!(engine.wait_stopped(Duration::from_secs(10)).unwrap());
+            if fail {
+                let error = engine.wait_stopped(Duration::from_secs(10)).unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains("injected delayed replay failure"));
+            } else {
+                assert!(engine.wait_stopped(Duration::from_secs(10)).unwrap());
+            }
         }
         drop(release);
         drop(channels);
