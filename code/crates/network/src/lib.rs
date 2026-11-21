@@ -33,6 +33,9 @@ pub use channel::{Channel, ChannelNames};
 mod metrics;
 use metrics::Metrics as NetworkMetrics;
 
+#[cfg(test)]
+mod swarm_metrics_tests;
+
 mod peer_type;
 pub use peer_type::PeerType;
 
@@ -885,6 +888,9 @@ async fn handle_swarm_event(
     state: &mut State,
     tx_event: &mpsc::Sender<Event>,
 ) -> ControlFlow<()> {
+    // Lifecycle events handled below must still reach the recorder: it pairs
+    // connection opens/closes and releases Identify data on the final close.
+    metrics.record(&event);
     if let SwarmEvent::Behaviour(NetworkEvent::GossipSub(e)) = &event {
         metrics.record(e);
     } else if let SwarmEvent::Behaviour(NetworkEvent::Identify(e)) = &event {
@@ -1080,9 +1086,7 @@ async fn handle_swarm_event(
             state.discovery.on_network_event(swarm, *network_event);
         }
 
-        swarm_event => {
-            metrics.record(&swarm_event);
-        }
+        _ => (),
     }
 
     ControlFlow::Continue(())
@@ -1438,7 +1442,7 @@ mod tests {
     use crate::state::tests::{test_inbound_request_id, test_state};
     use libp2p::request_response::InboundFailure;
 
-    fn gossip_test_config() -> Config {
+    pub(super) fn gossip_test_config() -> Config {
         Config {
             listen_addr: Multiaddr::empty(),
             persistent_peers: vec![],
