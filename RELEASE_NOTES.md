@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### `network`
+- Forward swarm events to the libp2p metrics recorder exactly once, including connection establishment and closure. This releases retained Identify information after a peer's final connection closes and restores connection-duration accounting.
+
 ## 0.8.2
 
 *October 19th, 2026*
